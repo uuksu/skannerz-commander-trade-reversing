@@ -29,31 +29,40 @@ const uint8_t PIN_CLK  = 2;
 const uint8_t PIN_DATA = 3;
 
 /* ---- Monster to send (the whole point of the exercise) ----
- * The 4-bit "nibble" field is a CHECKSUM over the number byte:
- *   nibble = (14 - hi(byte) - lo(byte)) mod 8
- * (analysis/nibble_rule.py; cracked 2026-07-16 from 9 accept/reject
- * pairs against a real toy at MONSTER_HP=63 - the old mod-4 "wrap 0->1"
- * theory was an artifact of too little data: 0 is a plain valid value,
- * and the true range is 0..7, never 8..15, in every sample seen so far).
- * Wrong nibble -> ERROR. It carries no identity — the monster is the
- * byte alone; num 43 confirmed valid, so the full roster (126 + 12
- * secret) is probably addressable.
- * NOTE: this formula is confirmed at HP=63 (the default below); a
- * handful of real-toy captures at HP=1..3 show different nibbles for
- * the same byte, so HP may also feed the checksum - untested, keep
- * MONSTER_HP at 63 until that's cracked.
+ * The 4-bit "nibble" field is a CHECKSUM over the number byte AND the
+ * (BCD-encoded) HP byte:
+ *   nibble = (-digitSum(byte) - 2*digitSum(hpBcd)) mod 8
+ * where digitSum(x) = hi_nibble(x) + lo_nibble(x). Cracked in two passes
+ * against a real toy (analysis/nibble_rule.py): the byte-only term on
+ * 2026-07-16 (9 accept/reject pairs at HP=63), the HP term the same day
+ * via a controlled sweep on one fixed byte (HP=1,2,3,4,10 - 6/6 exact
+ * matches, including the HP=10 test that decided between the only two
+ * linear models consistent with the earlier points). Wrong nibble ->
+ * ERROR. The nibble carries no monster identity - byte 0x89 (num 138)
+ * confirmed valid, so the full roster (126 + 12 secret) is probably
+ * addressable.
+ * NOTE: the HP term was solved entirely at MONSTER_EXP=9 (this sketch's
+ * default). A few older real-toy captures at other EXP values don't fit
+ * this formula, so EXP may be a third checksum input - untested, keep
+ * MONSTER_EXP at 9 until that's cracked.
  * NOTE: the toy's displayed monster number is NOT always byte + 1
  * (byte 0x0A displays as "11", but byte 0x04 as "15"); mapping under
  * investigation — use HARVEST_MODE.
- * HP goes on the wire as BCD (0x63 = 63); non-BCD bytes -> ERROR, and so
- * do values above the toy's max: BCD 63 is accepted, BCD 99 rejected
- * (exact ceiling in 63..98 untested — maybe 63, maybe 79 if the firmware
- * treats the byte as signed).
+ * HP goes on the wire as BCD (0x63 = 63); non-BCD bytes -> ERROR. No
+ * confirmed ceiling below 99: BCD 0x99 is accepted with the correct
+ * HP-aware checksum (2026-07-16) - the earlier "BCD 99 -> ERROR" finding
+ * predates knowing HP feeds the checksum, so that was a checksum
+ * mismatch, not a range check (same trap the NUM field's early "range
+ * errors" turned out to be). The toy's UI visibly breaks at HP 99 (the
+ * in-game balance cap is ~63) but the wire accepts it. 99 is also as
+ * high as MONSTER_HP can go through toBcd() without producing an
+ * invalid (non-BCD) byte, so it's untested whether the toy enforces any
+ * ceiling beyond BCD validity itself.
  * Level is not transmitted at all: the toy derives it from EXP
  * (one level per 30 experience points, per the manual). EXP round-trips
  * as a raw 7-bit value (127 came back as 127, displayed as 15). */
-const uint8_t MONSTER_NUM    = 140;   // wire byte = NUM-1
-const uint8_t MONSTER_HP     = 63;   // 1..63 (BCD-encoded by the sketch)
+const uint8_t MONSTER_NUM    = 138;   // wire byte = NUM-1
+const uint8_t MONSTER_HP     = 99;   // 1..99 (BCD-encoded by the sketch; ceiling above 99 untested)
 const uint8_t MONSTER_EXP    = 9;    // encoding not fully cracked: keep <= 9
                                      // (0, 5, 6, 127 seen; others may ERROR)
 const uint8_t MONSTER_NIBBLE = 0xFF; // 0xFF = auto (checksum rule);
@@ -208,19 +217,21 @@ static void sendFrame(uint8_t v, bool asEvent = false, bool afterEvent = false) 
 static inline uint8_t toBcd(uint8_t v)   { return ((v / 10) << 4) | (v % 10); }
 static inline uint8_t fromBcd(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
 
-/* Checksum rule for the payload nibble (see header comment). */
-static uint8_t checksumFor(uint8_t numByte) {
-  uint8_t hi = numByte >> 4, lo = numByte & 0x0F;
-  return (14 - hi - lo) & 0x07;
+/* Checksum rule for the payload nibble (see header comment): a BCD
+ * digit-sum checksum over the number byte and the (BCD-encoded) HP byte. */
+static uint8_t checksumFor(uint8_t numByte, uint8_t hpBcd) {
+  int8_t numSum = (numByte >> 4) + (numByte & 0x0F);
+  int8_t hpSum  = (hpBcd >> 4) + (hpBcd & 0x0F);
+  return (uint8_t)(-numSum - 2 * hpSum) & 0x07;
 }
 
-static uint8_t nibbleFor(uint8_t numByte) {
-  return MONSTER_NIBBLE != 0xFF ? MONSTER_NIBBLE : checksumFor(numByte);
+static uint8_t nibbleFor(uint8_t numByte, uint8_t hpBcd) {
+  return MONSTER_NIBBLE != 0xFF ? MONSTER_NIBBLE : checksumFor(numByte, hpBcd);
 }
 
 static void buildTxPayload() {
   uint8_t hp  = toBcd(MONSTER_HP);
-  uint8_t nib = nibbleFor(MONSTER_NUM - 1);
+  uint8_t nib = nibbleFor(MONSTER_NUM - 1, hp);
   uint8_t i = 0;
   txBits[i++] = 0;                                            // start
   txBits[i++] = 1; txBits[i++] = 1; txBits[i++] = 1;          // sync '111'
@@ -270,7 +281,7 @@ static void printRxMonster() {
   Serial.print(rxField(32, 44), HEX);
   Serial.print(F(" EXPraw="));
   Serial.println(rxField(44, 51));
-  uint8_t want = checksumFor(rxField(4, 12));
+  uint8_t want = checksumFor(rxField(4, 12), rxField(16, 24));
   Serial.print(F("<< nibble checksum: rule says "));
   Serial.print(want);
   Serial.println(rxField(12, 16) == want ? F(" - MATCH") : F(" - MISMATCH!"));
@@ -340,7 +351,7 @@ void setup() {
   Serial.print(F("sending monster num="));
   Serial.print(MONSTER_NUM);
   Serial.print(F(" nibble="));
-  Serial.print(nibbleFor(MONSTER_NUM - 1));
+  Serial.print(nibbleFor(MONSTER_NUM - 1, toBcd(MONSTER_HP)));
   Serial.print(F(" HP="));
   Serial.print(MONSTER_HP);
   Serial.print(F(" EXP="));

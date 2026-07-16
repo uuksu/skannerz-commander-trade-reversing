@@ -2,8 +2,8 @@
 
 Companion to `PROTOCOL.md` (read that first). Goal: replace one of the two
 toys with any MCU that can bit-bang two GPIOs, and send an arbitrary monster
-(one number byte; 1–42 verified, likely up to 126/138) with arbitrary
-HP (1–63).
+(one number byte; 1–138 verified, likely covering the whole 126+12
+roster) with arbitrary HP (1–99, no confirmed ceiling below that).
 
 ## Hardware
 
@@ -154,12 +154,13 @@ for 3 cycles after your frame ends.
 ### Building the payload (52 bits)
 
 For monster number byte `B` (= displayed identity via an unknown mapping;
-1..0x29 verified accepted) and `HP` (1–63):
+1..0x89 verified accepted) and `HP` (1–99, BCD-encoded):
 
 ```
-hp_bcd = (HP // 10) * 16 + HP % 10       # BCD! binary HP -> ERROR
-r      = ((B >> 4) - (B & 15) + 2) % 4   # nibble checksum over B
-check  = r if r else 1                   # residue 0 wraps to 1
+def digit_sum(x): return (x >> 4) + (x & 0x0F)
+
+hp_bcd = (HP // 10) * 16 + HP % 10                      # BCD! binary HP -> ERROR
+check  = (-digit_sum(B) - 2 * digit_sum(hp_bcd)) % 8     # checksum over B AND hp_bcd
 bits  = '0'                      # start
       + '111'                    # sync
       + f'{B:08b}'               # monster number byte
@@ -167,26 +168,33 @@ bits  = '0'                      # start
       + f'{hp_bcd:08b}'          # HP, BCD
       + f'{hp_bcd:08b}'          # HP again (duplicate)
       + '0'*12                   # unknown, zero
-      + '0000000'                # EXP = 0 (win counter; keep <= 9, see below)
+      + '0001001'                # EXP = 9 (win counter; keep at 9, see below)
       + '1'                      # stop
 ```
 
 Receiver-validated (real-toy testing, 2026-07-16): the checksum nibble
-must match `B` (mismatch → ERROR + link abort — this, not a range check,
-is what rejected numbers 43/58 before the rule was known); both HP bytes
-must be valid BCD **and within range** (0x3E → ERROR for the invalid low
-nibble; BCD 0x99 → ERROR for exceeding the max; BCD 0x63 = 63 is the
-highest verified-accepted value — the true ceiling is 63..98, see
-PROTOCOL.md §7). Level is not in the payload — the toy computes it from
-EXP (one level per 30 points), so a received monster with EXP 0 always
-shows level 1.
+must match `check` above (mismatch → ERROR + link abort — this, not a
+range check, is what rejected numbers 43/58 before the rule was known);
+both HP bytes must be valid BCD (0x3E → ERROR for the invalid low
+nibble). **No confirmed HP ceiling below 99**: BCD 0x99 (99) is accepted
+with the correct checksum — an earlier "BCD 99 → ERROR" finding predated
+knowing HP feeds the checksum and was a checksum mismatch, not a real
+range check (same trap the NUM field's early "range errors" turned out
+to be; see PROTOCOL.md §3.5/§7). The toy's UI visibly glitches at HP 99
+(in-game balance caps around 63) but the wire accepts it. Level is not
+in the payload — the toy computes it from EXP (one level per 30 points),
+so a received monster with EXP 0 always shows level 1.
 
-The EXP encoding is not fully cracked (0, 6 and 127 verified accepted; 127
-displays as 15; some other values → ERROR; see PROTOCOL.md §7 for the test
-matrix). Keep it ≤ 9 until resolved (BCD == binary for single digits).
+The checksum formula above was cracked entirely at EXP=9 — a few
+real-toy samples at other EXP values don't fit it, so EXP may be a third
+checksum input; keep EXP at 9 until that's resolved (see PROTOCOL.md §7).
+The EXP *display* encoding is separately not fully cracked (0, 6 and 127
+verified accepted; 127 displays as 15; some other values → ERROR; see
+PROTOCOL.md §7 for the test matrix).
 
-Note HP=0 is untested; the display flow suggests HP ≥ 1. Values > 63 are
-rejected (or at best untested) — stay at ≤ 63.
+Note HP=0 is untested; the display flow suggests HP ≥ 1. HP=99 is the
+ceiling `hp_bcd` above can express without producing a non-BCD byte —
+whether the toy enforces anything beyond BCD validity itself is untested.
 
 ### Session state machine
 
