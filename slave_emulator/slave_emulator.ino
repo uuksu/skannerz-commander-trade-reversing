@@ -30,12 +30,18 @@ const uint8_t PIN_DATA = 3;
 
 /* ---- Monster to send (the whole point of the exercise) ----
  * The 4-bit "nibble" field is a CHECKSUM over the number byte:
- *   r = (hi(byte) - lo(byte) + 2) mod 4;   nibble = r, or 1 when r == 0
- * (analysis/nibble_rule.py; the 0 -> 1 wrap is what a real toy sent for
- * byte 0x0A, so NIBBLE_WRAP guessing is obsolete). Wrong nibble -> ERROR.
- * It carries no identity — the monster is the byte alone; num 43
- * confirmed valid, so the full roster (126 + 12 secret) is probably
- * addressable.
+ *   nibble = (14 - hi(byte) - lo(byte)) mod 8
+ * (analysis/nibble_rule.py; cracked 2026-07-16 from 9 accept/reject
+ * pairs against a real toy at MONSTER_HP=63 - the old mod-4 "wrap 0->1"
+ * theory was an artifact of too little data: 0 is a plain valid value,
+ * and the true range is 0..7, never 8..15, in every sample seen so far).
+ * Wrong nibble -> ERROR. It carries no identity — the monster is the
+ * byte alone; num 43 confirmed valid, so the full roster (126 + 12
+ * secret) is probably addressable.
+ * NOTE: this formula is confirmed at HP=63 (the default below); a
+ * handful of real-toy captures at HP=1..3 show different nibbles for
+ * the same byte, so HP may also feed the checksum - untested, keep
+ * MONSTER_HP at 63 until that's cracked.
  * NOTE: the toy's displayed monster number is NOT always byte + 1
  * (byte 0x0A displays as "11", but byte 0x04 as "15"); mapping under
  * investigation — use HARVEST_MODE.
@@ -46,7 +52,7 @@ const uint8_t PIN_DATA = 3;
  * Level is not transmitted at all: the toy derives it from EXP
  * (one level per 30 experience points, per the manual). EXP round-trips
  * as a raw 7-bit value (127 came back as 127, displayed as 15). */
-const uint8_t MONSTER_NUM    = 49;   // wire byte = NUM-1
+const uint8_t MONSTER_NUM    = 140;   // wire byte = NUM-1
 const uint8_t MONSTER_HP     = 63;   // 1..63 (BCD-encoded by the sketch)
 const uint8_t MONSTER_EXP    = 9;    // encoding not fully cracked: keep <= 9
                                      // (0, 5, 6, 127 seen; others may ERROR)
@@ -204,8 +210,8 @@ static inline uint8_t fromBcd(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
 
 /* Checksum rule for the payload nibble (see header comment). */
 static uint8_t checksumFor(uint8_t numByte) {
-  uint8_t r = ((numByte >> 4) + 3 * (numByte & 0x0F) + 2) & 0x03;
-  return r ? r : 1;
+  uint8_t hi = numByte >> 4, lo = numByte & 0x0F;
+  return (14 - hi - lo) & 0x07;
 }
 
 static uint8_t nibbleFor(uint8_t numByte) {

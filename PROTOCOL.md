@@ -149,8 +149,9 @@ Observed payloads:
 
 Field semantics (capture + 2026-07-16 emulator-vs-real-toy testing):
 
-- **NUM**: the monster's identity, one byte. Bytes 0x01–0x2A verified
-  accepted (with correct checksum); the roster is 126 regular + 12 secret
+- **NUM**: the monster's identity, one byte. Bytes 0x01–0x87 (1–135)
+  verified accepted (with correct checksum), including byte 0x87 (num
+  136) near the top of the roster; the roster is 126 regular + 12 secret
   monsters, so bytes up to ~137 are plausibly valid — the early failures
   at 0x2A/0x39 were checksum mismatches, not range errors (0x2A was later
   accepted with the right checksum).
@@ -165,16 +166,22 @@ Field semantics (capture + 2026-07-16 emulator-vs-real-toy testing):
   number byte, stored in the 4-bit field:
 
   ```
-  r = (hi_nibble(NUM) − lo_nibble(NUM) + 2) mod 4 ;  check = r, or 1 if r = 0
+  check = (14 − hi_nibble(NUM) − lo_nibble(NUM)) mod 8
   ```
 
-  Fits all nine accepted payloads — including a real toy sending check 1
-  for the residue-0 byte 0x0A, which pins the wrap — and explains all five
-  rejections (receiver shows ERROR and aborts the link on mismatch). The
-  nibble carries no monster information — earlier "level"/"tribe"/
-  "category" readings are all dead. Remaining check: byte 0x39 (also
-  residue 0) was rejected with nibble 3 and 4; the rule's value 1 is
-  pending retest. Level, for the record, is never transmitted: the toy
+  Confirmed at HP=63 against 10 accepted payloads (including nums 42,
+  43, 44, 12, 135, 136, 15, 49, 123 from manual accept/reject testing
+  against a real toy on 2026-07-16) and 3 rejections, zero mismatches —
+  `analysis/nibble_rule.py` regenerates this check. Supersedes an earlier
+  mod-4 "residue 0 wraps to 1" theory, which was an artifact of too small
+  a dataset: 0 is a plain valid check value, and the observed range is
+  0..7 (the field's top bit has never been set in any sample). The
+  nibble carries no monster identity — earlier "level"/"tribe"/"category"
+  readings are all dead. Untested: whether HP (or EXP) also feeds the
+  checksum — the formula above is confirmed only at HP=63; a couple of
+  real-toy captures at HP=1–3 show different check values for bytes that
+  would need a different result at HP=63, so keep HP pinned at 63 until
+  that's resolved. Level, for the record, is never transmitted: the toy
   derives it from experience (one level per 30 EXP, per the manual),
   which is why received monsters with low EXP always show level 1.
 - **HP twice, BCD, max ~63**: current HP duplicated, **BCD-encoded**.
@@ -276,11 +283,11 @@ switch is inferred from timing against the known user flow.
   verify what Diamond Back (byte 0x11) displays — 18 or 28 — and whether
   any monster displays "18". Harvest-mode logging of every real monster
   (name + displayed number + wire payload) resolves this empirically.
-- Checksum wrap: confirmed 1 for byte 0x0A (real payload); byte 0x39
-  (num 58) with nibble 1 pending retest.
-- Valid range of the number byte: 0x2A confirmed; are bytes up to 0x7D
-  (126) accepted? The 12 secret monsters presumably byte 0x7E..0x89
-  (127..138)?
+- Checksum formula cracked (mod 8, see §3.5) and hardware-confirmed at
+  HP=63; whether HP/EXP also feed it is untested (see §3.5 caveat).
+- Valid range of the number byte: 0x87 (135) confirmed; are bytes up to
+  0x7D (126) and the 12 secret monsters (presumably 0x7E..0x89, 127..138)
+  all accepted? 0x87 alone suggests the secret-monster range is live too.
 - Trade-abort behavior: after an aborted exchange (slave goes silent),
   the master re-sends the *same* monster payload in the next session
   regardless of a new selection — back fully out of the toy's trade menu

@@ -1,18 +1,19 @@
 I tested couple of the monster numbers, some work, some do not.
 
 Working:
-42 nibble auto
-43, nibble auto
-44, nibble auto
-12, nibble auto
+42 nibble 3
+43, nibble 2
+44, nibble 1
+12, nibble 3
 135, nibble 0
+136, nibble 7
+15, nibble 0
+49, nibble 3
+123, nibble 5
 
 Not working:
-49
-15
-123
-98
-58
+98, nibble auto
+58, nibble auto
 
 When erroring I see bunch of this:
 
