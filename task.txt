@@ -1,0 +1,49 @@
+Your task is to reverse engineer trading protocol of Skannerz, 2003 electronic toy made by Radica.
+
+These toys allow scanning barcodes and capture and battle monsters. One the features is trading
+with friend by connecting the devices together. The connection is three pins:
+
+PIN 1 = Clock/Data
+PIN 2 = GND
+PIN 3 = Clock/Data
+
+What is known so far is that devices have a special handshake, where they both output clock on one PIN
+and handshake on another. Once in a while the clock stops and it is assumed that the device listens for another
+devices handshake. If it's heard, it flips the connection around, so that both device use same PIN for clock and 
+data.
+
+After this the trading happens. Here is the trading flow from users perspective:
+
+- Devices flash "Link", waiting for connection and trade mode
+- Both connected and trade, devices show "Ok!"
+- Both select monster that is traded to other
+- Each other sees the incoming monster (image and HP)
+- Each select "Accept" or "Do not accept", shows "Ok!" when selected.
+- Trade completes, monsters exchange and trading mode closes
+
+I've captured data of the previous trading process using logic analyzer. I used sample rate of 200 kHz.
+
+I traded monsters from devices to each other:
+
+Device 1 monster: ID: 002, HP: 3
+Device 2 monster: ID: 018, HP: 1
+
+Note that the device do not possibly need more information than that to complete the trade. Other
+monster data they know by themselves or it can be derived from this information. There is 138 monsters
+in Skannerz and maximum HP is 99.
+
+Previous research indicates that the protocol is some kind of SPI variant that uses following settings:
+
+CPOL=1 (idle high)
+CPHA=0 (sample on falling edge)
+
+trade.csv contains this raw capture as CSV file. Each column represents one logic analyzer channel (from 0-3). In this setup
+devices agree after handshake that channel 0 and 3 (PIN2) is data and channel 1 and 2 (PIN 1) is clock.
+Note that this is raw data, so you need to read it based on the protocol settings. The file is very large, do not even try
+to read it at once, you have to find the relevant parts your self.
+
+You are complete when you have complete picture of how the trading happens and have produced so good documentation
+that one of the devices can be replaced with any MCU than can bit bang the same procotol. The second new device
+should be able to send any monster with any HP value. Create living documentation that you update as you go and not as a final phase.
+
+

@@ -1,0 +1,63 @@
+I tested couple of the monster numbers, some work, some do not.
+
+Working:
+42 nibble auto
+43, nibble auto
+44, nibble auto
+12, nibble auto
+135, nibble 0
+
+Not working:
+49
+15
+123
+98
+58
+
+When erroring I see bunch of this:
+
+?? master sent 0x2 (event frame)
+?? master sent 0xFF
+?? master sent 0xE1 (event frame)
+
+Here is sample of monsters I sent to trade:
+
+11 1/1 HP, EXP 0
+
+<< rx payload: 0 111 00001010 0001 00000001 00000001 000000000000 0000101 1
+<< numByte=10 (num 11) nibble=1 HP=0x1/0x1 (BCD 1) zeros=0x0 EXPraw=5
+<< nibble checksum: rule says 1 - MATCH
+
+18 1/1 HP, EXP 0
+
+<< rx payload: 0 111 00010001 0010 00000001 00000001 000000000000 0000110 1
+<< numByte=17 (num 18) nibble=2 HP=0x1/0x1 (BCD 1) zeros=0x0 EXPraw=6
+<< nibble checksum: rule says 2 - MATCH
+
+19 1/1 HP, EXP 0
+
+<< rx payload: 0 111 00010010 0010 00000001 00000001 000000000000 0000111 1
+<< numByte=18 (num 19) nibble=2 HP=0x1/0x1 (BCD 1) zeros=0x0 EXPraw=7
+<< nibble checksum: rule says 1 - MISMATCH!
+
+15 1/1 HP, EXP 0
+
+<< rx payload: 0 111 00001110 0010 00000001 00000001 000000000000 0000010 1
+<< numByte=14 (num 15) nibble=2 HP=0x1/0x1 (BCD 1) zeros=0x0 EXPraw=2
+<< nibble checksum: rule says 1 - MISMATCH!
+
+136 2/2 HP, EXP 0
+<< rx payload: 0 111 10000111 0011 00000010 00000010 000000000000 0000110 1
+<< numByte=135 (num 136) nibble=3 HP=0x2/0x2 (BCD 2) zeros=0x0 EXPraw=6
+<< nibble checksum: rule says 3 - MATCH
+
+EXP tests:
+
+9 = EXP 1
+16 = ERROR
+21 = ERROR
+64 = EXP 8
+112 = ERROR
+128 = EXP 0
+
+
