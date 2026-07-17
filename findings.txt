@@ -70,3 +70,39 @@ EXP 2, rejected, correct value 7
 EXP 3, rejected, correct value 8 (tälle kelpasi toinenkin? kelpaako muille?)
 EXP 4, rejected, correct value 9
 EXP 16, rejected, correct value 3
+
+2026-07-17, EXP display re-test with the fixed auto-checksum (NUM=138,
+HP=63 fixed), reading both the "EXP" stat and "Level" after accepting:
+
+9,   Level 2, EXP 1
+16,  Level 1, EXP 2
+21,  Level 1, EXP 2
+64,  Level 2, EXP 8
+112, Level 2, EXP 14
+128, Level 2, EXP 0     (truncates to raw 0 on the 7-bit wire field)
+
+EXP display = EXP // 8, all 6 exact, no offset. But Level does NOT track
+EXP/30+1 like the manual claims - it's not even monotonic in EXP. Traced
+it to the checksum nibble instead: level = (nibble>>2)+1. Filled in the
+remaining untested nibble residues (1, 2, 4, 6) to get full 0-7 coverage:
+
+4, Level 1, EXP 0   (nibble 1)
+5, Level 1, EXP 0   (nibble 2)
+7, Level 2, EXP 0   (nibble 4)
+1, Level 2, EXP 0   (nibble 6)
+
+8/8 nibble residues (0-7, all with top bit 0) confirmed against
+(nibble>>2)+1, zero mismatches. First conclusion: level capped at 1-2.
+WRONG - that only tested the 3 bits the checksum validates, never the
+"don't care" top bit. Forced MONSTER_NIBBLE to (residue)+8 - top bit
+set, low 3 bits unchanged, so still checksum-valid - on 4 of the same
+EXP baselines:
+
+21, Level 3, EXP 2   (nibble forced to 8  = 0+8)
+16, Level 3, EXP 2   (nibble forced to 11 = 3+8)
+7,  Level 4, EXP 0   (nibble forced to 12 = 4+8)
+1,  Level 4, EXP 0   (nibble forced to 14 = 6+8)
+
+4/4 exact, all still accepted. So level = (nibble>>2)+1 over the FULL
+4-bit field, levels 1-4, not 1-2. 12/12 nibble values now confirmed.
+See analysis/nibble_rule.py LEVEL_TESTS/EXP_DISPLAY_TESTS.

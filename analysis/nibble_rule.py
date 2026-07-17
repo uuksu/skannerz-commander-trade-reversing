@@ -43,6 +43,28 @@ motivated passes 2 and 3 in the first place - see full_rule() below):
 expTerm(9) == 0, which is why every number/HP experiment in this project
 "just worked" while EXP sat at the emulator's default of 9 - EXP's
 contribution was silently cancelling out the entire time.
+
+BONUS FIND 2026-07-17: the nibble isn't *just* a checksum - the FULL
+4-bit wire field is also the "Level" the toy displays after a trade:
+
+    level = (nibble >> 2) + 1        # nibble is the full 4-bit value, 0..15
+
+Proven in two rounds against a real toy, both at fixed NUM=138 (byte
+0x89), HP=63. Round 1: every one of the 8 checksum-valid residues (0-7,
+top bit 0) was hit by some EXP value (21->0, 4->1, 5->2, 16->3, 7->4,
+9/64/128(truncates to 0)->5, 1->6, 112->7); observed level matched
+(nibble>>2)+1 in all 8 cases - but since the checksum only checks
+`nibble mod 8` (the top bit is a don't-care for acceptance - a real toy
+accepts both n and n+8), this round only ever exercised levels 1-2.
+Round 2 forced the top bit set on 4 of the same EXP values (nibble ->
+nibble+8, still accepted) and got levels 3-4, 4/4 exact - see
+LEVEL_TESTS/level_from_nibble() below. Net picture: NUM+HP+EXP fix bit 2
+of the nibble via the checksum (not freely choosable), but the top bit
+is free, so for one monster you can reach exactly two levels (L, L+2) by
+choosing which checksum-valid nibble to send; the other pair needs
+different NUM/HP/EXP. All four levels (1-4) are reachable this way. This
+still refutes the manual's "one level per 30 EXP" as the literal
+mechanism - level isn't a function of EXP alone here.
 """
 from itertools import combinations, product
 
@@ -134,6 +156,46 @@ def full_rule(b, hp_bcd, exp):
     return (-digit_sum(b) - 2 * digit_sum(hp_bcd) + exp_term) & 7
 
 
+def level_from_nibble(nibble):
+    """Displayed "Level" after a trade. Cracked 2026-07-17: the full
+    4-bit wire nibble (0..15), not just the 3 bits the checksum checks -
+    confirmed for all 8 checksum-valid residues (levels 1-2) AND their
+    top-bit-set twins (levels 3-4), 12/12 real-toy readings exact."""
+    return (nibble >> 2) + 1
+
+
+def exp_display(exp):
+    """Displayed "EXP" stat (separate from Level). Cracked 2026-07-17:
+    floor(EXP/8) - confirmed at EXP=9/16/21/64/112/128(truncates to 0)."""
+    return exp // 8
+
+
+# fmt: off
+LEVEL_TESTS = [  # fixed b=0x89 (num 138), hp=0x63; real-toy readings, 2026-07-17
+    dict(exp=21,  nibble=0, level=1),
+    dict(exp=4,   nibble=1, level=1),
+    dict(exp=5,   nibble=2, level=1),
+    dict(exp=16,  nibble=3, level=1),
+    dict(exp=7,   nibble=4, level=2),
+    dict(exp=9,   nibble=5, level=2),
+    dict(exp=64,  nibble=5, level=2),
+    dict(exp=0,   nibble=5, level=2),  # sent 128; truncates to 0 on the 7-bit wire field
+    dict(exp=1,   nibble=6, level=2),
+    dict(exp=112, nibble=7, level=2),
+    # round 2: same EXP baselines, MONSTER_NIBBLE forced to (auto value)+8
+    # (top bit set - still accepted, since the checksum ignores it)
+    dict(exp=21, nibble=8,  level=3),
+    dict(exp=16, nibble=11, level=3),
+    dict(exp=7,  nibble=12, level=4),
+    dict(exp=1,  nibble=14, level=4),
+]
+EXP_DISPLAY_TESTS = [  # real-toy readings, 2026-07-17
+    dict(exp=9, shown=1), dict(exp=16, shown=2), dict(exp=21, shown=2),
+    dict(exp=64, shown=8), dict(exp=112, shown=14), dict(exp=0, shown=0),
+]
+# fmt: on
+
+
 def features(s):
     b, hp, exp = s["b"], s["hp"], s["exp"]
     return {
@@ -196,6 +258,14 @@ def main():
         full_rule(s["b"], s["hp"], s["exp"]) != s["n"] for s in NEG)
     print(f"FULL rule (byte + HP + EXP), ALL {len(POS)} pos + {len(NEG)} neg: "
           f"{'fits all data' if okf else 'REFUTED'}")
+
+    okl = all(level_from_nibble(t["nibble"]) == t["level"] for t in LEVEL_TESTS)
+    print(f"LEVEL rule (nibble>>2)+1, all {len(LEVEL_TESTS)} nibble values (0-15): "
+          f"{'fits all data' if okl else 'REFUTED'}")
+
+    oke = all(exp_display(t["exp"]) == t["shown"] for t in EXP_DISPLAY_TESTS)
+    print(f"EXP display rule EXP//8, all {len(EXP_DISPLAY_TESTS)} samples: "
+          f"{'fits all data' if oke else 'REFUTED'}")
 
 
 if __name__ == "__main__":

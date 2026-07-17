@@ -168,8 +168,11 @@ bits  = '0'                      # start
       + f'{check:04b}'           # checksum nibble - wrong value -> ERROR (only low 3 bits checked)
       + f'{hp_bcd:08b}'          # HP, BCD
       + f'{hp_bcd:08b}'          # HP again (duplicate)
-      + '0'*12                   # unknown, zero
-      + f'{EXP:07b}'             # EXP (win counter; raw binary, any value)
+      + f'{ZEROS:012b}'          # unknown; 0 in every capture so far, but the
+                                  # leading suspect for the toy's REAL persistent
+                                  # experience counter - see the note below
+      + f'{EXP:07b}'             # a win-counter-like field, but its own menu
+                                  # readout caps at 15 - may not be real EXP
       + '1'                      # stop
 ```
 
@@ -186,20 +189,63 @@ earlier "BCD 99 → ERROR" finding predated knowing HP feeds the checksum
 and was a checksum mismatch, not a real range check (same trap the NUM
 field's early "range errors" turned out to be; see PROTOCOL.md §3.5/§7).
 The toy's UI visibly glitches at HP 99 (in-game balance caps around 63)
-but the wire accepts it. Level is not in the payload — the toy computes
-it from EXP (one level per 30 points), so a received monster with EXP 0
-always shows level 1.
+but the wire accepts it. **Level is not simply derived from EXP** — it's
+the **full 4-bit nibble field**: `level = (nibble >> 2) + 1`, giving
+levels 1–4. Proven in two rounds against a real toy (2026-07-17): first,
+all 8 checksum-valid residues with the top bit 0 gave levels 1–2 (8/8);
+then, since the checksum only validates `nibble mod 8` (top bit is a
+don't-care for acceptance — see below), forcing the top bit set on the
+same monsters (`nibble` → `nibble+8`, still accepted) gave levels 3–4
+(4/4). So NUM/HP/EXP fix bit 2 of the nibble via the checksum (not
+freely choosable), but the top bit is free — for any one monster you can
+pick between exactly two levels (`L`, `L+2`) by choosing which
+checksum-valid nibble to send; the other pair needs different NUM/HP/EXP.
+**The real in-game ceiling is level 3** — 4 is a wire-reachable value the
+checksum doesn't reject (it only validates 3 of the 4 bits) but real
+game data never produces; treat nibble 12–15 as out-of-spec, not a 4th
+tier.
+
+Rather than hand-deriving raw wire values for a target level, the sketch
+exposes `TARGET_LEVEL` (1..3) and `TARGET_EXP` (0..127) directly.
+**CAUTION, reopened 2026-07-17**: `TARGET_EXP`'s own menu readout (only
+visible in the toy's monster menu, never during a trade) is proven to be
+`rawEXP // 8`, capped at 15 no matter what's sent — but the manual
+describes real experience as an accumulating, non-transferable,
+battle-won stat that visibly exceeds 15 in normal play. That's a direct
+contradiction, so `TARGET_EXP` is **not confirmed** to be the same
+counter the monster menu shows for locally-raised monsters; it's
+possibly a different, deliberately-capped stat. The likelier home for
+the real counter is the previously-untouched 12 "zeros" bits — see
+`MONSTER_ZEROS` below, an active, not-yet-hardware-tested probe.
+`solveLevelExp()` works out the wire EXP + nibble in `setup()`: it sends
+`TARGET_EXP` exactly if that already lands on the checksum band
+`TARGET_LEVEL` needs, otherwise it nudges only the low 3 bits (searching
+within the same `EXP/8` "tens" bucket, which always contains a match —
+proven exhaustively) to the closest value that does, so the sent EXP
+never drifts more than a few units from what was asked and refuses
+`TARGET_LEVEL=4`. Set `USE_LEVEL_EXP_INTERFACE 0` to fall back to setting
+`MONSTER_EXP`/`MONSTER_NIBBLE` by hand for lower-level experiments (e.g.
+deliberately probing the level-4 glitch).
+
+`MONSTER_ZEROS` (0..4095) sends an explicit value in the 12 previously-
+always-zero bits, for testing whether that's where the real experience
+counter lives. To test: set `MONSTER_ZEROS` to something recognizable
+(e.g. 30) and `MONSTER_EXP`/`TARGET_EXP` to something clearly different
+(e.g. 0), trade, then check the monster menu (not the trade screen).
+If it reads "30", the zeros field is the real counter and the 7-bit
+`EXP` field is something else; if it still reads whatever `TARGET_EXP`'s
+`//8` predicts, the zeros field is inert and the real counter is
+elsewhere entirely (not yet identified).
 
 The checksum formula above is fully solved, including the EXP term —
 `exp_term(9) == 0` is exactly why every earlier NUM/HP experiment
 "just worked" while EXP sat at the emulator's default of 9. The EXP
-*display* encoding is a separate, still-open question: what the receiver
-shows for a given raw EXP value, and the 7- vs 8-bit width (0, 1..16 and
-127 verified accepted at the wire level now that the checksum is
-correct; 127 displays as 15; some other values ERRORed in earlier tests
-that predate the checksum fix and were plausibly checksum mismatches,
-not real EXP-validity errors — worth re-testing; see PROTOCOL.md §7 for
-the test matrix).
+*display* stat (separate from Level, and separate from the checksum) is
+also solved: `EXP // 8`, floor division — proven by a real-toy sweep at
+EXP = 9/16/21/64/112/128 (truncates to 0 on the wire), all exact; a
+BCD-decode theory was tested and refuted (EXP=16 decodes to BCD 10,
+predicting display 1, but the toy showed 2). Field width (7 vs 8 bit) is
+still open.
 
 Note HP=0 is untested; the display flow suggests HP ≥ 1. HP=99 is the
 ceiling `hp_bcd` above can express without producing a non-BCD byte —
