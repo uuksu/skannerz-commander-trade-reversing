@@ -61,4 +61,12 @@ EXP tests:
 112 = ERROR
 128 = EXP 0
 
+HP 3, rejected, correct value 1
+HP 4, rejected, correct value 7
+HP 10, accepted, correct value 5
 
+EXP 1, rejected, correct value 6
+EXP 2, rejected, correct value 7
+EXP 3, rejected, correct value 8 (tälle kelpasi toinenkin? kelpaako muille?)
+EXP 4, rejected, correct value 9
+EXP 16, rejected, correct value 3

@@ -159,38 +159,47 @@ For monster number byte `B` (= displayed identity via an unknown mapping;
 ```
 def digit_sum(x): return (x >> 4) + (x & 0x0F)
 
-hp_bcd = (HP // 10) * 16 + HP % 10                      # BCD! binary HP -> ERROR
-check  = (-digit_sum(B) - 2 * digit_sum(hp_bcd)) % 8     # checksum over B AND hp_bcd
+hp_bcd   = (HP // 10) * 16 + HP % 10                     # BCD! binary HP -> ERROR
+exp_term = (EXP % 8) - (EXP // 8)
+check    = (-digit_sum(B) - 2 * digit_sum(hp_bcd) + exp_term) % 8  # checksum over B, hp_bcd, EXP
 bits  = '0'                      # start
       + '111'                    # sync
       + f'{B:08b}'               # monster number byte
-      + f'{check:04b}'           # checksum nibble - wrong value -> ERROR
+      + f'{check:04b}'           # checksum nibble - wrong value -> ERROR (only low 3 bits checked)
       + f'{hp_bcd:08b}'          # HP, BCD
       + f'{hp_bcd:08b}'          # HP again (duplicate)
       + '0'*12                   # unknown, zero
-      + '0001001'                # EXP = 9 (win counter; keep at 9, see below)
+      + f'{EXP:07b}'             # EXP (win counter; raw binary, any value)
       + '1'                      # stop
 ```
 
 Receiver-validated (real-toy testing, 2026-07-16): the checksum nibble
 must match `check` above (mismatch → ERROR + link abort — this, not a
-range check, is what rejected numbers 43/58 before the rule was known);
-both HP bytes must be valid BCD (0x3E → ERROR for the invalid low
-nibble). **No confirmed HP ceiling below 99**: BCD 0x99 (99) is accepted
-with the correct checksum — an earlier "BCD 99 → ERROR" finding predated
-knowing HP feeds the checksum and was a checksum mismatch, not a real
-range check (same trap the NUM field's early "range errors" turned out
-to be; see PROTOCOL.md §3.5/§7). The toy's UI visibly glitches at HP 99
-(in-game balance caps around 63) but the wire accepts it. Level is not
-in the payload — the toy computes it from EXP (one level per 30 points),
-so a received monster with EXP 0 always shows level 1.
+range check, is what rejected numbers 43/58 before the rule was known),
+though only its low 3 bits are actually checked — the toy accepts both
+`check` and `check + 8` for the same monster (confirmed by testing both
+directly), so the top bit is a don't-care and `check` as computed above
+(always 0..7) is always a valid choice. Both HP bytes must be valid BCD
+(0x3E → ERROR for the invalid low nibble). **No confirmed HP ceiling
+below 99**: BCD 0x99 (99) is accepted with the correct checksum — an
+earlier "BCD 99 → ERROR" finding predated knowing HP feeds the checksum
+and was a checksum mismatch, not a real range check (same trap the NUM
+field's early "range errors" turned out to be; see PROTOCOL.md §3.5/§7).
+The toy's UI visibly glitches at HP 99 (in-game balance caps around 63)
+but the wire accepts it. Level is not in the payload — the toy computes
+it from EXP (one level per 30 points), so a received monster with EXP 0
+always shows level 1.
 
-The checksum formula above was cracked entirely at EXP=9 — a few
-real-toy samples at other EXP values don't fit it, so EXP may be a third
-checksum input; keep EXP at 9 until that's resolved (see PROTOCOL.md §7).
-The EXP *display* encoding is separately not fully cracked (0, 6 and 127
-verified accepted; 127 displays as 15; some other values → ERROR; see
-PROTOCOL.md §7 for the test matrix).
+The checksum formula above is fully solved, including the EXP term —
+`exp_term(9) == 0` is exactly why every earlier NUM/HP experiment
+"just worked" while EXP sat at the emulator's default of 9. The EXP
+*display* encoding is a separate, still-open question: what the receiver
+shows for a given raw EXP value, and the 7- vs 8-bit width (0, 1..16 and
+127 verified accepted at the wire level now that the checksum is
+correct; 127 displays as 15; some other values ERRORed in earlier tests
+that predate the checksum fix and were plausibly checksum mismatches,
+not real EXP-validity errors — worth re-testing; see PROTOCOL.md §7 for
+the test matrix).
 
 Note HP=0 is untested; the display flow suggests HP ≥ 1. HP=99 is the
 ceiling `hp_bcd` above can express without producing a non-BCD byte —

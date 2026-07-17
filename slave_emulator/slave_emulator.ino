@@ -29,22 +29,25 @@ const uint8_t PIN_CLK  = 2;
 const uint8_t PIN_DATA = 3;
 
 /* ---- Monster to send (the whole point of the exercise) ----
- * The 4-bit "nibble" field is a CHECKSUM over the number byte AND the
- * (BCD-encoded) HP byte:
- *   nibble = (-digitSum(byte) - 2*digitSum(hpBcd)) mod 8
- * where digitSum(x) = hi_nibble(x) + lo_nibble(x). Cracked in two passes
- * against a real toy (analysis/nibble_rule.py): the byte-only term on
- * 2026-07-16 (9 accept/reject pairs at HP=63), the HP term the same day
- * via a controlled sweep on one fixed byte (HP=1,2,3,4,10 - 6/6 exact
- * matches, including the HP=10 test that decided between the only two
- * linear models consistent with the earlier points). Wrong nibble ->
- * ERROR. The nibble carries no monster identity - byte 0x89 (num 138)
- * confirmed valid, so the full roster (126 + 12 secret) is probably
- * addressable.
- * NOTE: the HP term was solved entirely at MONSTER_EXP=9 (this sketch's
- * default). A few older real-toy captures at other EXP values don't fit
- * this formula, so EXP may be a third checksum input - untested, keep
- * MONSTER_EXP at 9 until that's cracked.
+ * The 4-bit "nibble" field is a CHECKSUM, fully cracked 2026-07-16
+ * against a real toy (analysis/nibble_rule.py), over the number byte,
+ * the (BCD-encoded) HP byte, and EXP:
+ *   digitSum(x) = hi_nibble(x) + lo_nibble(x)
+ *   expTerm     = (EXP % 8) - (EXP / 8)
+ *   nibble = (-digitSum(byte) - 2*digitSum(hpBcd) + expTerm) mod 8
+ * Only the low 3 bits are checked - a real toy accepted both n and n+8
+ * for the same monster (confirmed at n=0/8 and n=1/9), so the top bit is
+ * a don't-care and checksumFor() below only ever needs to produce 0..7.
+ * Cracked in three passes, each a controlled accept/reject sweep against
+ * a real toy: the byte term (9 pairs at HP=63, EXP=9), the HP term (one
+ * fixed byte, HP=1/2/3/4/10), the EXP term (one fixed byte+HP, EXP swept
+ * 1..9/16 on two different byte+HP baselines to confirm separability).
+ * expTerm(9) == 0, which is exactly why every earlier byte/HP experiment
+ * "just worked" while EXP sat at this sketch's default of 9 - EXP's
+ * contribution was silently cancelling out the whole time.
+ * Wrong nibble -> ERROR. The nibble carries no monster identity - byte
+ * 0x89 (num 138) confirmed valid, so the full roster (126 + 12 secret)
+ * is probably addressable.
  * NOTE: the toy's displayed monster number is NOT always byte + 1
  * (byte 0x0A displays as "11", but byte 0x04 as "15"); mapping under
  * investigation — use HARVEST_MODE.
@@ -62,9 +65,10 @@ const uint8_t PIN_DATA = 3;
  * (one level per 30 experience points, per the manual). EXP round-trips
  * as a raw 7-bit value (127 came back as 127, displayed as 15). */
 const uint8_t MONSTER_NUM    = 138;   // wire byte = NUM-1
-const uint8_t MONSTER_HP     = 99;   // 1..99 (BCD-encoded by the sketch; ceiling above 99 untested)
-const uint8_t MONSTER_EXP    = 9;    // encoding not fully cracked: keep <= 9
-                                     // (0, 5, 6, 127 seen; others may ERROR)
+const uint8_t MONSTER_HP     = 63;   // 1..99 (BCD-encoded by the sketch; ceiling above 99 untested)
+const uint8_t MONSTER_EXP    = 9;    // checksum contribution solved for any value (0..127
+                                     // confirmed up to 16); the separate *display* transform
+                                     // is not - some values may still ERROR for other reasons
 const uint8_t MONSTER_NIBBLE = 0xFF; // 0xFF = auto (checksum rule);
                                      // 0..15 forces a value, for experiments
 
@@ -218,20 +222,23 @@ static inline uint8_t toBcd(uint8_t v)   { return ((v / 10) << 4) | (v % 10); }
 static inline uint8_t fromBcd(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
 
 /* Checksum rule for the payload nibble (see header comment): a BCD
- * digit-sum checksum over the number byte and the (BCD-encoded) HP byte. */
-static uint8_t checksumFor(uint8_t numByte, uint8_t hpBcd) {
+ * digit-sum checksum over the number byte and the (BCD-encoded) HP byte,
+ * plus a base-8 digit-difference term over EXP. Only the low 3 bits are
+ * checked (the toy accepts either n or n+8 - confirmed by testing both). */
+static uint8_t checksumFor(uint8_t numByte, uint8_t hpBcd, uint8_t exp) {
   int8_t numSum = (numByte >> 4) + (numByte & 0x0F);
   int8_t hpSum  = (hpBcd >> 4) + (hpBcd & 0x0F);
-  return (uint8_t)(-numSum - 2 * hpSum) & 0x07;
+  int8_t expTerm = (exp % 8) - (exp / 8);
+  return (uint8_t)(-numSum - 2 * hpSum + expTerm) & 0x07;
 }
 
-static uint8_t nibbleFor(uint8_t numByte, uint8_t hpBcd) {
-  return MONSTER_NIBBLE != 0xFF ? MONSTER_NIBBLE : checksumFor(numByte, hpBcd);
+static uint8_t nibbleFor(uint8_t numByte, uint8_t hpBcd, uint8_t exp) {
+  return MONSTER_NIBBLE != 0xFF ? MONSTER_NIBBLE : checksumFor(numByte, hpBcd, exp);
 }
 
 static void buildTxPayload() {
   uint8_t hp  = toBcd(MONSTER_HP);
-  uint8_t nib = nibbleFor(MONSTER_NUM - 1, hp);
+  uint8_t nib = nibbleFor(MONSTER_NUM - 1, hp, MONSTER_EXP);
   uint8_t i = 0;
   txBits[i++] = 0;                                            // start
   txBits[i++] = 1; txBits[i++] = 1; txBits[i++] = 1;          // sync '111'
@@ -281,10 +288,10 @@ static void printRxMonster() {
   Serial.print(rxField(32, 44), HEX);
   Serial.print(F(" EXPraw="));
   Serial.println(rxField(44, 51));
-  uint8_t want = checksumFor(rxField(4, 12), rxField(16, 24));
+  uint8_t want = checksumFor(rxField(4, 12), rxField(16, 24), rxField(44, 51));
   Serial.print(F("<< nibble checksum: rule says "));
   Serial.print(want);
-  Serial.println(rxField(12, 16) == want ? F(" - MATCH") : F(" - MISMATCH!"));
+  Serial.println((rxField(12, 16) & 0x07) == want ? F(" - MATCH") : F(" - MISMATCH!"));
   if (rxField(1, 4) != 0b111 || rxBits[51] != 1)
     Serial.println(F("   (warning: bad sync/stop - payload misread?)"));
 }
@@ -351,7 +358,7 @@ void setup() {
   Serial.print(F("sending monster num="));
   Serial.print(MONSTER_NUM);
   Serial.print(F(" nibble="));
-  Serial.print(nibbleFor(MONSTER_NUM - 1, toBcd(MONSTER_HP)));
+  Serial.print(nibbleFor(MONSTER_NUM - 1, toBcd(MONSTER_HP), MONSTER_EXP));
   Serial.print(F(" HP="));
   Serial.print(MONSTER_HP);
   Serial.print(F(" EXP="));

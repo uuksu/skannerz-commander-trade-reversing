@@ -1,44 +1,52 @@
 """Search for the payload nibble validation rule.
 
 The receiver validates the 4-bit nibble (bits 12-15) jointly with the
-number byte (bits 4-11) and possibly HP/EXP. Accepted/rejected samples
-from the capture and from emulator-vs-real-toy tests (2026-07-16):
+number byte (bits 4-11), the (BCD-encoded) HP byte, and EXP:
 
     (numByte, hpByte, expByte) -> nibble        accepted?
 
-CRACKED 2026-07-16 in two passes, both against a real toy at
-MONSTER_EXP=9 (the emulator's default):
+FULLY CRACKED 2026-07-16 in three passes, each a controlled accept/reject
+sweep against a real toy:
 
-Pass 1 (byte only, at HP=63): nibble = (14 - digitSum(numByte)) mod 8,
-where digitSum(x) = hi_nibble(x) + lo_nibble(x). Confirmed by 9 manual
-accept tests (nums 42/43/44/12/135/136/15/49/123) with zero mismatches,
-plus every earlier accept/reject sample at HP=63. Mod 8, not mod 4 - the
-earlier "residue 0 wraps to 1" theory was an artifact of a too-small
-dataset (0 is a perfectly valid nibble; the true range is 0..7, an
-unused top bit, never 8..15 in any sample).
+Pass 1 (byte term, at HP=63, EXP=9): nibble = (14 - digitSum(numByte))
+mod 8, where digitSum(x) = hi_nibble(x) + lo_nibble(x). Confirmed by 9
+manual accept tests (nums 42/43/44/12/135/136/15/49/123) with zero
+mismatches, plus every earlier accept/reject sample at HP=63. Mod 8, not
+mod 4 - the earlier "residue 0 wraps to 1" theory was an artifact of a
+too-small dataset (0 is a perfectly valid nibble).
 
-Pass 2 (HP term): a controlled sweep on one fixed byte (num 138) across
-HP=1,2,3,4,10 found exactly two linear models in HP's BCD digits
-consistent with HP=1/2/63; the HP=10 test (predicted nibble 1 vs 5 by
-the two models) picked the winner:
+Pass 2 (HP term, at EXP=9): a controlled sweep on one fixed byte
+(num 138) across HP=1,2,3,4,10 found
     nibble = (-digitSum(numByte) - 2*digitSum(bcd(HP))) mod 8
-6/6 exact matches on the controlled sweep, and it subsumes pass 1
-exactly (at HP=63, digitSum(bcd(63))=9 and -2*9 == +14 - (-14) mod 8,
-i.e. the two formulas are congruent mod 8).
+6/6 exact, and it subsumes pass 1 exactly (at HP=63, this reduces to the
+same residues mod 8).
 
-CAVEAT: pass 2 was solved entirely at EXP=9. Two real-toy captures with
-this formula's byte+HP terms known (Night Lurk EXP=0, Diamond Back
-EXP=6, both from the original trade.csv) plus several HARVEST_MODE
-captures at nonzero EXP are listed in EXTRA below - most don't fit,
-suggesting EXP may be a third checksum input. Untested; keep EXP=9 for
-now (see full_rule() below, and EXTRA's mismatches).
+Pass 3 (EXP term): a sweep on the same fixed byte+HP across
+EXP=1,2,3,4,5,6,7,8,9,16 found the "+EXP" pattern holds for EXP=1..7 but
+breaks at EXP=8 - UNTIL re-testing showed some nibbles have a confirmed
+"twin" 8 apart (EXP=3 accepts both 8 and 0; EXP=4 accepts both 9 and 1).
+That means the toy only checks the low 3 bits of the nibble field - the
+top bit is a don't-care - and the full pattern is
+    expTerm = (EXP % 8) - (EXP // 8)
+A second sweep on a different byte (num 135, EXP=1..4) confirmed EXP's
+contribution is separable (same shift regardless of which monster/HP is
+being sent).
+
+FULL FORMULA (fits every sample ever gathered in this project, including
+the two original trade.csv captures and four HARVEST_MODE dumps that
+motivated passes 2 and 3 in the first place - see full_rule() below):
+
+    digitSum(x) = hi_nibble(x) + lo_nibble(x)
+    expTerm     = (EXP % 8) - (EXP // 8)
+    nibble = (-digitSum(numByte) - 2*digitSum(bcd(HP)) + expTerm) mod 8
+
+expTerm(9) == 0, which is why every number/HP experiment in this project
+"just worked" while EXP sat at the emulator's default of 9 - EXP's
+contribution was silently cancelling out the entire time.
 """
 from itertools import combinations, product
 
 # fmt: off
-# All POS/NEG entries below are at EXP=9 (or EXP untested-but-irrelevant
-# per the byte-only EXP=0-vs-127 check on b=0x29) - the formula is only
-# validated at this EXP. See EXTRA for other-EXP real-device samples.
 POS = [  # accepted trades: nibble is (assumed) correct for these fields
     dict(b=0x04, hp=0x63, exp=0x00, n=2),   # emulator (displays as "15")
     dict(b=0x0B, hp=0x63, exp=0x00, n=3),   # emulator/manual num 12
@@ -58,6 +66,25 @@ POS = [  # accepted trades: nibble is (assumed) correct for these fields
     dict(b=0x89, hp=0x03, exp=0x09, n=1),   # manual HP sweep: num 138, HP=3
     dict(b=0x89, hp=0x04, exp=0x09, n=7),   # manual HP sweep: num 138, HP=4
     dict(b=0x89, hp=0x10, exp=0x09, n=5),   # manual HP sweep: num 138, HP=10 (BCD)
+    dict(b=0x89, hp=0x63, exp=0x01, n=6),   # manual EXP sweep: num 138, HP=63
+    dict(b=0x89, hp=0x63, exp=0x02, n=7),
+    dict(b=0x89, hp=0x63, exp=0x03, n=0),   # observed as 8; also confirmed as its twin 0 (8 mod 8)
+    dict(b=0x89, hp=0x63, exp=0x04, n=1),   # observed as 9; also confirmed as its twin 1 (9 mod 8)
+    dict(b=0x89, hp=0x63, exp=0x05, n=2),
+    dict(b=0x89, hp=0x63, exp=0x06, n=3),
+    dict(b=0x89, hp=0x63, exp=0x07, n=4),
+    dict(b=0x89, hp=0x63, exp=0x08, n=4),
+    dict(b=0x89, hp=0x63, exp=0x10, n=3),   # EXP=16
+    dict(b=0x86, hp=0x63, exp=0x01, n=1),   # manual EXP sweep, 2nd baseline: num 135
+    dict(b=0x86, hp=0x63, exp=0x02, n=2),
+    dict(b=0x86, hp=0x63, exp=0x03, n=3),
+    dict(b=0x86, hp=0x63, exp=0x04, n=4),
+    dict(b=0x01, hp=0x03, exp=0x00, n=1),   # capture: Night Lurk
+    dict(b=0x11, hp=0x01, exp=0x06, n=2),   # capture: Diamond Back
+    dict(b=0x0A, hp=0x01, exp=0x05, n=1),   # harvest: monster "11"
+    dict(b=0x0E, hp=0x01, exp=0x02, n=2),   # harvest: monster "15"
+    dict(b=0x12, hp=0x01, exp=0x07, n=2),   # harvest: monster "19"
+    dict(b=0x87, hp=0x02, exp=0x06, n=3),   # harvest: monster "136"
 ]
 NEG = [  # rejected: the sent nibble must NOT be what the rule demands
     dict(b=0x04, hp=0x63, exp=0x00, n=1),
@@ -69,20 +96,14 @@ NEG = [  # rejected: the sent nibble must NOT be what the rule demands
     dict(b=0x89, hp=0x02, exp=0x09, n=5),   # num 138 HP=2, byte-only auto (failed)
     dict(b=0x89, hp=0x03, exp=0x09, n=5),   # num 138 HP=3, byte-only auto (failed)
     dict(b=0x89, hp=0x04, exp=0x09, n=5),   # num 138 HP=4, byte-only auto (failed)
+    dict(b=0x89, hp=0x63, exp=0x01, n=5),   # num 138 EXP=1, byte+HP-only auto (failed)
+    dict(b=0x89, hp=0x63, exp=0x02, n=5),   # num 138 EXP=2, byte+HP-only auto (failed)
+    dict(b=0x89, hp=0x63, exp=0x05, n=5),   # num 138 EXP=5, byte+HP-only auto (failed)
+    dict(b=0x89, hp=0x63, exp=0x06, n=5),   # num 138 EXP=6, byte+HP-only auto (failed)
+    dict(b=0x89, hp=0x63, exp=0x07, n=5),   # num 138 EXP=7, byte+HP-only auto (failed)
+    dict(b=0x89, hp=0x63, exp=0x08, n=5),   # num 138 EXP=8, byte+HP-only auto (failed)
 ]
 # fmt: on
-
-# Real-device samples NOT used to fit full_rule (EXP != 9, and/or not an
-# accept/reject test - just what the device happened to send). Listed to
-# track the open EXP question, not as ground truth for the fit above.
-EXTRA = [
-    dict(b=0x01, hp=0x03, exp=0x00, n=1),   # capture: Night Lurk
-    dict(b=0x11, hp=0x01, exp=0x06, n=2),   # capture: Diamond Back
-    dict(b=0x0A, hp=0x01, exp=0x05, n=1),   # harvest: monster "11"
-    dict(b=0x0E, hp=0x01, exp=0x02, n=2),   # harvest: monster "15"
-    dict(b=0x12, hp=0x01, exp=0x07, n=2),   # harvest: monster "19"
-    dict(b=0x87, hp=0x02, exp=0x06, n=3),   # harvest: monster "136"
-]
 
 
 def wrapped_rule(b):
@@ -96,16 +117,21 @@ def digit_sum(x):
 
 
 def mod8_rule(b):
-    """Byte-only model (valid at HP=63). Confirmed 2026-07-16."""
+    """Byte-only model (valid at HP=63, EXP=9). Confirmed 2026-07-16."""
     return (14 - digit_sum(b)) & 7
 
 
-def full_rule(b, hp_bcd):
-    """Current model: nibble = (-digitSum(b) - 2*digitSum(hpBcd)) mod 8.
-    hp_bcd is the wire byte (BCD-encoded), matching this dataset's `hp`
-    field and checksumFor()'s second argument in slave_emulator.ino.
-    Confirmed 2026-07-16 at EXP=9; see module docstring for the EXP caveat."""
+def byte_hp_rule(b, hp_bcd):
+    """Byte+HP model (valid at EXP=9). Confirmed 2026-07-16."""
     return (-digit_sum(b) - 2 * digit_sum(hp_bcd)) & 7
+
+
+def full_rule(b, hp_bcd, exp):
+    """Complete model: byte + HP + EXP. Fully cracked 2026-07-16.
+    hp_bcd is the wire byte (BCD-encoded); exp is the raw EXP value.
+    Fits every sample gathered in this project (see module docstring)."""
+    exp_term = (exp % 8) - (exp // 8)
+    return (-digit_sum(b) - 2 * digit_sum(hp_bcd) + exp_term) & 7
 
 
 def features(s):
@@ -149,36 +175,27 @@ def main():
                                     break
                             if ok:
                                 hits.append((m, combo, coefs, k, target))
-    print(f"{len(hits)} linear candidate rules fit all data")
+    print(f"{len(hits)} linear candidate rules fit all data (naive 1-2 feature search)")
     for m, combo, coefs, k, target in hits[:40]:
         terms = " + ".join(f"{c}*{n}" for n, c in zip(combo, coefs))
         print(f"  {target} == ({terms} + {k}) mod {m}")
 
-    hp63_pos = [s for s in POS if s["hp"] == 0x63]
-    hp63_neg = [s for s in NEG if s["hp"] == 0x63]
+    hp63exp9_pos = [s for s in POS if s["hp"] == 0x63 and s["exp"] == 0x09]
+    hp63exp9_neg = [s for s in NEG if s["hp"] == 0x63 and s["exp"] == 0x09]
+    ok8 = all(mod8_rule(s["b"]) == s["n"] for s in hp63exp9_pos) and all(
+        mod8_rule(s["b"]) != s["n"] for s in hp63exp9_neg)
+    print(f"\nbyte-only rule, HP=63/EXP=9 subset: {'fits' if ok8 else 'REFUTED'}")
 
-    ok = all(wrapped_rule(s["b"]) == s["n"] for s in hp63_pos) and all(
-        wrapped_rule(s["b"]) != s["n"] for s in hp63_neg)
-    print(f"mod-4 rule (r = (hi-lo+2) mod 4; 0->1), HP=63 subset: "
-          f"{'fits' if ok else 'REFUTED'}")
+    exp9_pos = [s for s in POS if s["exp"] == 0x09]
+    exp9_neg = [s for s in NEG if s["exp"] == 0x09]
+    okhp = all(byte_hp_rule(s["b"], s["hp"]) == s["n"] for s in exp9_pos) and all(
+        byte_hp_rule(s["b"], s["hp"]) != s["n"] for s in exp9_neg)
+    print(f"byte+HP rule, EXP=9 subset: {'fits' if okhp else 'REFUTED'}")
 
-    ok8 = all(mod8_rule(s["b"]) == s["n"] for s in hp63_pos) and all(
-        mod8_rule(s["b"]) != s["n"] for s in hp63_neg)
-    print(f"byte-only mod-8 rule, HP=63 subset: "
-          f"{'fits' if ok8 else 'REFUTED'}")
-
-    okf = all(full_rule(s["b"], s["hp"]) == s["n"] for s in POS) and all(
-        full_rule(s["b"], s["hp"]) != s["n"] for s in NEG)
-    print(f"full rule (nibble = (-digitSum(b) - 2*digitSum(hp)) mod 8), "
-          f"ALL {len(POS)} pos + {len(NEG)} neg (every HP tested): "
+    okf = all(full_rule(s["b"], s["hp"], s["exp"]) == s["n"] for s in POS) and all(
+        full_rule(s["b"], s["hp"], s["exp"]) != s["n"] for s in NEG)
+    print(f"FULL rule (byte + HP + EXP), ALL {len(POS)} pos + {len(NEG)} neg: "
           f"{'fits all data' if okf else 'REFUTED'}")
-
-    print(f"\nEXTRA (EXP != 9, not accept/reject-tested - informational only):")
-    for s in EXTRA:
-        got = full_rule(s["b"], s["hp"])
-        status = "match" if got == s["n"] else f"MISMATCH (got {got})"
-        print(f"  b=0x{s['b']:02X} hp=0x{s['hp']:02X} exp={s['exp']} "
-              f"n={s['n']}  {status}")
 
 
 if __name__ == "__main__":
