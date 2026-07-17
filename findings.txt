@@ -106,3 +106,43 @@ EXP baselines:
 4/4 exact, all still accepted. So level = (nibble>>2)+1 over the FULL
 4-bit field, levels 1-4, not 1-2. 12/12 nibble values now confirmed.
 See analysis/nibble_rule.py LEVEL_TESTS/EXP_DISPLAY_TESTS.
+
+2026-07-18: user pushed back hard on the EXP//8 finding above - real
+experience should be settable past 15 (e.g. 30) and shouldn't even be
+transferable, so a 15-ceiling must mean we misidentified the field.
+Right call. Sequence of real-toy tests that found the actual counter:
+
+1. MONSTER_ZEROS=30 (plain binary), old zeros-less checksum (auto
+   nibble=5) -> ERROR. Proves the receiver DOES look at the 12 "zeros"
+   bits - they're not padding.
+
+2. Hypothesis: zeros feeds the checksum the same way NUM does,
+   nibble -= digitSum3(zeros) (digit sum of its 3 hex nibbles). Fit the
+   single ERROR data point exactly (predicted nibble 6 for zeros=30).
+
+3. MONSTER_ZEROS=30, MONSTER_NIBBLE=6 (forced, predicted) -> ACCEPTED.
+   Monster menu: Level 2, EXP 1140. Checksum hypothesis confirmed, but
+   1140 from 30 doesn't fit any plain-binary transform tried.
+
+4. Explanation: 30 as plain binary = 0b000000011110 = hex nibbles
+   0,1,14 - 14 isn't a valid decimal digit. The field is BCD like HP,
+   and doesn't reject invalid BCD (no ERROR, just garbage output).
+
+5. MONSTER_ZEROS=48 (0x030, BCD "030"), MONSTER_NIBBLE=2 (predicted via
+   the same digitSum3 hypothesis, digitSum3(0x030)=3) -> ACCEPTED.
+   Monster menu: Level 1, EXP 300. digitSum3 hypothesis now 2/2. And
+   300 = 10 * 30 (the BCD-decoded value) - clean multiplier.
+
+6. MONSTER_ZEROS=3 (0x003, BCD "003", same digit sum as 0x030) with the
+   SAME predicted nibble=2 -> ACCEPTED. Monster menu: EXP 30 = 10*3.
+   Confirms: real experience = 3-digit BCD in the zeros field, x10.
+
+Formula: zeros = BCD(realEXP/10) (hundreds,tens,ones nibbles), checksum
+term -digitSum3(zeros). realEXP must be a multiple of 10 - no finer
+resolution found. The old 7-bit "EXP" field (EXP//8 display, capped at
+15) is NOT the real counter - it's now just a small checksum-satisfying
+knob (solveLevelExp() keeps it 0..7, confirmed not to disturb the
+zeros-driven display). slave_emulator.ino's TARGET_LEVEL/TARGET_EXP
+interface was rewritten around this - TARGET_EXP is now 0..9990 and
+means the real value, not the old field's raw 0..127.
+See analysis/nibble_rule.py ZEROS_TESTS/real_exp_display().

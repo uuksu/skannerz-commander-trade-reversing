@@ -72,58 +72,59 @@ const uint8_t PIN_DATA = 3;
  * high as MONSTER_HP can go through toBcd() without producing an
  * invalid (non-BCD) byte, so it's untested whether the toy enforces any
  * ceiling beyond BCD validity itself.
- * EXP is a raw 7-bit win-counter (round-trips bit-exact: 127 sent came
- * back as 127). The displayed "EXP" stat is EXP/8 (floor, no offset),
- * fully solved 2026-07-17 by a real-toy sweep (9->1, 16->2, 21->2,
- * 64->8, 112->14, 128 (truncates to 0 on the wire)->0, all exact) - a
- * BCD-decode theory (like HP's encoding) was tested and refuted at
- * EXP=16 (would predict display 1, actually shows 2). Level is NOT
- * EXP/30+1 as the manual implies - see the nibble note above. */
+ * The REAL persistent experience counter is 3-digit BCD packed into the
+ * 12 "zeros" bits (wire bits 32-43), displayed as 10x its decoded value
+ * - confirmed 2026-07-18: zeros=BCD"030" showed monster-menu EXP 300;
+ * zeros=BCD"003" showed EXP 30. It also feeds the checksum (see
+ * checksumFor() below): nibble_low3 -= digitSum3(zeros), confirmed 3/3
+ * by predicting the accepted nibble ahead of testing for two different
+ * zeros values. Sending zeros as plain binary instead of BCD (e.g. 30
+ * as 0b000000011110, nibbles 0/1/14 - 14 isn't a valid decimal digit)
+ * doesn't error, it just produces garbage (observed: displayed EXP
+ * 1140) - so this field isn't BCD-validated the strict way HP is.
+ * The 7-bit "EXP" field is NOT the real experience counter - that was
+ * the original assumption (round-trips bit-exact: 127 sent came back as
+ * 127; its own monster-menu readout is EXP/8, floor, confirmed 14/14 -
+ * see analysis/nibble_rule.py) but it's capped at 15 no matter what's
+ * sent, which can't be real battle-won experience (confirmed exceeding
+ * 15 in normal play, and shouldn't be trade-transferable per the
+ * manual). It's now used purely as a small checksum-satisfying knob
+ * (solveLevelExp() keeps it in 0..7, where its display contribution is
+ * always floor(exp/8)==0, confirmed not to disturb the zeros-driven
+ * display). Level is NOT EXP/30+1 as the manual implies - see the
+ * nibble note above. */
 const uint8_t MONSTER_NUM    = 138;   // wire byte = NUM-1
 const uint8_t MONSTER_HP     = 63;   // 1..99 (BCD-encoded by the sketch; ceiling above 99 untested)
 
 /* Primary interface: say what you want the monster's real stats to be,
- * not the raw wire fields. 1 = derive MONSTER_EXP/MONSTER_NIBBLE below
- * from TARGET_LEVEL/TARGET_EXP via solveLevelExp() (see its comment for
- * how); 0 = fall back to setting MONSTER_EXP/MONSTER_NIBBLE directly,
- * for lower-level experiments (e.g. deliberately sending the level-4
- * glitch value). */
+ * not the raw wire fields. 1 = derive MONSTER_ZEROS/MONSTER_EXP/
+ * MONSTER_NIBBLE below from TARGET_LEVEL/TARGET_EXP via solveLevelExp()
+ * (see its comment for how); 0 = fall back to setting
+ * MONSTER_ZEROS/MONSTER_EXP/MONSTER_NIBBLE directly, for lower-level
+ * experiments (e.g. deliberately sending the level-4 glitch value, or
+ * plain-binary zeros to reproduce the pre-BCD-fix garbage display). */
 #define USE_LEVEL_EXP_INTERFACE 1
 
 #if USE_LEVEL_EXP_INTERFACE
-const uint8_t TARGET_LEVEL = 3;   // 1..3 - the level the toy should show.
-                                   // 4 is a real wire value but not a real
-                                   // game one (see header comment); refused.
-const uint8_t TARGET_EXP   = 0;  // 0..127. CAUTION 2026-07-17: this field's
-                                   // receiver-side readout (visible only in
-                                   // the toy's monster menu, NOT during a
-                                   // trade) has been proven to cap at
-                                   // floor(TARGET_EXP/8), max 15 - it may
-                                   // NOT be the same persistent experience
-                                   // counter the manual describes (that one
-                                   // is believed to exceed 15 from normal
-                                   // battling and should not be
-                                   // trade-transferable). See MONSTER_ZEROS
-                                   // below - still probing for the real field.
+const uint8_t  TARGET_LEVEL = 2;   // 1..3 - the level the toy should show.
+                                    // 4 is a real wire value but not a real
+                                    // game one (see header comment); refused.
+const uint16_t TARGET_EXP   = 30;  // 0..9990 - the REAL experience counter
+                                    // (confirmed 2026-07-18, see header
+                                    // comment). Must be a multiple of 10 -
+                                    // the BCD field can't express finer
+                                    // resolution; non-multiples are rounded
+                                    // down with a warning at boot.
 #endif
 
-uint8_t MONSTER_EXP    = 0;    // raw win-counter 0..127; overwritten by
-                               // solveLevelExp() in setup() if
-                               // USE_LEVEL_EXP_INTERFACE is 1
-uint8_t MONSTER_NIBBLE = 0xFF; // 0xFF = auto (checksum rule); 0..15 forces a
-                               // value; overwritten the same way as MONSTER_EXP
-
-/* EXPERIMENTAL 2026-07-17: the 12 "zeros" bits (wire bits 32-43) have been
- * sent as all-zero in every test since the project started, on the
- * assumption they were padding. They're the only unexplored region left
- * in the payload, and a prime suspect for holding the toy's REAL
- * persistent experience counter (wide enough for values > 15, unlike the
- * proven-capped-at-15 EXP field above). Set this to a real-world value
- * you can compare against the monster menu (e.g. 30) and MONSTER_EXP to
- * something distinguishable (e.g. 0) to test whether it's this field,
- * not MONSTER_EXP, that the toy actually displays as experience. */
-const uint16_t MONSTER_ZEROS = 0;  // 0..4095, MSB-first; 0 matches every
-                                    // capture/test so far
+uint16_t MONSTER_ZEROS = 0;    // 0..4095 (3-digit BCD = real EXP/10);
+                               // overwritten by solveLevelExp() in setup()
+                               // if USE_LEVEL_EXP_INTERFACE is 1
+uint8_t MONSTER_EXP    = 0;    // raw 0..127; NOT the real EXP counter (see
+                               // header comment) - just a checksum knob.
+                               // Overwritten the same way as MONSTER_ZEROS
+uint8_t MONSTER_NIBBLE = 0xFF; // 0xFF = auto (checksum rule); 0..15 forces
+                               // a value; overwritten the same way too
 
 /* Harvest mode: complete the payload exchange (so the toy's monster data
  * gets logged over serial), then keep acking without ever accepting, so
@@ -271,76 +272,88 @@ static void sendFrame(uint8_t v, bool asEvent = false, bool afterEvent = false) 
 
 /* ---------------- payload ---------------- */
 
-static inline uint8_t toBcd(uint8_t v)   { return ((v / 10) << 4) | (v % 10); }
-static inline uint8_t fromBcd(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
-
-/* Checksum rule for the payload nibble (see header comment): a BCD
- * digit-sum checksum over the number byte and the (BCD-encoded) HP byte,
- * plus a base-8 digit-difference term over EXP. Only the low 3 bits are
- * checked (the toy accepts either n or n+8 - confirmed by testing both).
- * Bit 2 of the returned value doubles as the displayed "Level" (>>2)+1. */
-static uint8_t checksumFor(uint8_t numByte, uint8_t hpBcd, uint8_t exp) {
-  int8_t numSum = (numByte >> 4) + (numByte & 0x0F);
-  int8_t hpSum  = (hpBcd >> 4) + (hpBcd & 0x0F);
-  int8_t expTerm = (exp % 8) - (exp / 8);
-  return (uint8_t)(-numSum - 2 * hpSum + expTerm) & 0x07;
+static inline uint8_t  toBcd(uint8_t v)     { return ((v / 10) << 4) | (v % 10); }
+static inline uint8_t  fromBcd(uint8_t v)   { return (v >> 4) * 10 + (v & 0x0F); }
+static inline uint16_t toBcd3(uint16_t v)   {  // v: 0..999 -> 3-digit BCD in 12 bits
+  return ((v / 100) << 8) | (((v / 10) % 10) << 4) | (v % 10);
+}
+static inline uint16_t fromBcd3(uint16_t v12) {  // inverse of toBcd3()
+  return ((v12 >> 8) & 0xF) * 100 + ((v12 >> 4) & 0xF) * 10 + (v12 & 0xF);
+}
+static inline uint8_t digitSum3(uint16_t v12) {
+  return ((v12 >> 8) & 0xF) + ((v12 >> 4) & 0xF) + (v12 & 0xF);
 }
 
-static uint8_t nibbleFor(uint8_t numByte, uint8_t hpBcd, uint8_t exp) {
-  return MONSTER_NIBBLE != 0xFF ? MONSTER_NIBBLE : checksumFor(numByte, hpBcd, exp);
+/* Checksum rule for the payload nibble (see header comment): a BCD
+ * digit-sum checksum over the number byte, the (BCD-encoded) HP byte,
+ * and the (BCD-encoded) zeros/real-EXP field, plus a base-8
+ * digit-difference term over the small 7-bit EXP field. Only the low 3
+ * bits are checked (the toy accepts either n or n+8 - confirmed by
+ * testing both). Bit 2 of the returned value doubles as the displayed
+ * "Level" (>>2)+1. */
+static uint8_t checksumFor(uint8_t numByte, uint8_t hpBcd, uint16_t zerosBcd, uint8_t exp) {
+  int8_t numSum    = (numByte >> 4) + (numByte & 0x0F);
+  int8_t hpSum     = (hpBcd >> 4) + (hpBcd & 0x0F);
+  int8_t zerosSum  = digitSum3(zerosBcd);
+  int8_t expTerm   = (exp % 8) - (exp / 8);
+  return (uint8_t)(-numSum - 2 * hpSum - zerosSum + expTerm) & 0x07;
+}
+
+static uint8_t nibbleFor(uint8_t numByte, uint8_t hpBcd, uint16_t zerosBcd, uint8_t exp) {
+  return MONSTER_NIBBLE != 0xFF ? MONSTER_NIBBLE : checksumFor(numByte, hpBcd, zerosBcd, exp);
 }
 
 /* Given NUM/HP and a desired (Level, EXP) pair, work out the raw wire
- * EXP + nibble that produce them (2026-07-17 finding). Level =
- * (nibble>>2)+1: the nibble's low 3 bits are pinned to checksumFor(...),
- * only the top bit is free (checksumFor()>>2 is the "band" - 0 picks
- * between level 1/3, 1 picks between level 2/4 - and the top bit then
- * picks which of the pair). At the EXACT target EXP the band is fixed,
- * so only 2 of the 3 real levels are reachable there - but EXP's low 3
- * bits (exp = 8*(targetExp/8) + r, r=0..7) cycle through all 8 checksum
- * residues as r varies, so ANY level is reachable within the same "tens"
- * bucket (targetExp/8 unchanged) by nudging only those low bits. This
- * picks the r closest to what was actually requested, so the sent EXP
- * lands as near TARGET_EXP as possible while still hitting TARGET_LEVEL
- * exactly (max deviation across the whole NUM/HP/level/EXP space is 4,
- * verified by exhaustive search offline). Level 4 is a real wire value
- * (see header comment) but not a real game one, so it's refused here. */
-static void solveLevelExp(uint8_t numByte, uint8_t hpBcd, uint8_t level, uint8_t targetExp,
-                           uint8_t &outExp, uint8_t &outNibble) {
+ * zeros/EXP/nibble that produce them (2026-07-17/07-18 findings). The
+ * REAL persistent experience counter is 3-digit BCD in the "zeros"
+ * field, displayed as 10x its decoded value - see the header comment.
+ * targetExp must be a multiple of 10 (the BCD field can't express finer
+ * resolution); non-multiples are rounded down with a warning.
+ * Level = (nibble>>2)+1: the nibble's low 3 bits are pinned by
+ * checksumFor(), only the top bit is free. With zeros fixed by
+ * targetExp, only 2 of the 3 real levels are directly reachable there -
+ * but the small EXP field's low 3 bits (0..7) cycle through all 8
+ * checksum residues (expTerm(exp)==exp for exp<8), so any level is
+ * reachable without perturbing zeros or its 10x-scaled display; EXP
+ * stays in 0..7 throughout, where its own display contribution
+ * (floor(exp/8)) is always 0 - confirmed not to disturb the
+ * zeros-driven readout. Level 4 is a real wire value (see header
+ * comment) but not a real game one, so it's refused here. */
+static void solveLevelExp(uint8_t numByte, uint8_t hpBcd, uint8_t level, uint16_t targetExp,
+                           uint16_t &outZeros, uint8_t &outExp, uint8_t &outNibble) {
   if (level < 1 || level > 3) {
     Serial.println(F("TARGET_LEVEL must be 1..3 (4 is an invalid glitch value) - halting"));
     while (true) {}
   }
-  if (targetExp > 127) {
-    Serial.println(F("TARGET_EXP must be 0..127 - halting"));
+  if (targetExp > 9990) {
+    Serial.println(F("TARGET_EXP must be 0..9990 - halting"));
     while (true) {}
   }
-  uint8_t band       = (level == 2) ? 1 : 0;  // level 1/3 -> band 0, level 2 -> band 1
-  uint8_t topBit     = (level == 3) ? 1 : 0;  // level 3 is level 1's "+8 twin"
-  uint8_t decadeBase = (targetExp / 8) * 8;
-  uint8_t r0         = targetExp - decadeBase;
-  int16_t bestDist   = 999;
-  for (uint8_t r = 0; r < 8; r++) {
-    uint8_t exp = decadeBase + r;
-    uint8_t c = checksumFor(numByte, hpBcd, exp);
+  if (targetExp % 10 != 0) {
+    Serial.print(F("TARGET_EXP "));
+    Serial.print(targetExp);
+    Serial.print(F(" isn't a multiple of 10 (the real counter can't represent that) - rounding down to "));
+    targetExp = (targetExp / 10) * 10;
+    Serial.println(targetExp);
+  }
+  outZeros = toBcd3(targetExp / 10);
+  uint8_t band   = (level == 2) ? 1 : 0;  // level 1/3 -> band 0, level 2 -> band 1
+  uint8_t topBit = (level == 3) ? 1 : 0;  // level 3 is level 1's "+8 twin"
+  for (uint8_t exp = 0; exp < 8; exp++) {
+    uint8_t c = checksumFor(numByte, hpBcd, outZeros, exp);
     if ((c >> 2) == band) {
-      int16_t dist = (r > r0) ? (r - r0) : (r0 - r);
-      if (dist < bestDist) {
-        bestDist  = dist;
-        outExp    = exp;
-        outNibble = c | (topBit << 3);
-      }
+      outExp    = exp;
+      outNibble = c | (topBit << 3);
+      return;
     }
   }
-  if (bestDist == 999) {  // mathematically unreachable (see comment), but don't ship garbage
-    Serial.println(F("solveLevelExp: no candidate found - this should be impossible - halting"));
-    while (true) {}
-  }
+  Serial.println(F("solveLevelExp: no candidate found - this should be impossible - halting"));
+  while (true) {}
 }
 
 static void buildTxPayload() {
   uint8_t hp  = toBcd(MONSTER_HP);
-  uint8_t nib = nibbleFor(MONSTER_NUM - 1, hp, MONSTER_EXP);
+  uint8_t nib = nibbleFor(MONSTER_NUM - 1, hp, MONSTER_ZEROS, MONSTER_EXP);
   uint8_t i = 0;
   txBits[i++] = 0;                                            // start
   txBits[i++] = 1; txBits[i++] = 1; txBits[i++] = 1;          // sync '111'
@@ -348,7 +361,7 @@ static void buildTxPayload() {
   for (int8_t b = 3; b >= 0; b--) txBits[i++] = (nib >> b) & 1;
   for (int8_t b = 7; b >= 0; b--) txBits[i++] = (hp >> b) & 1;
   for (int8_t b = 7; b >= 0; b--) txBits[i++] = (hp >> b) & 1;
-  for (int8_t b = 11; b >= 0; b--) txBits[i++] = (MONSTER_ZEROS >> b) & 1;  // unknown - probing for real EXP
+  for (int8_t b = 11; b >= 0; b--) txBits[i++] = (MONSTER_ZEROS >> b) & 1;  // real EXP, 3-digit BCD, x10
   for (int8_t b = 6; b >= 0; b--) txBits[i++] = (MONSTER_EXP >> b) & 1;
   txBits[i++] = 1;                                            // stop
 }
@@ -390,7 +403,7 @@ static void printRxMonster() {
   Serial.print(rxField(32, 44), HEX);
   Serial.print(F(" EXPraw="));
   Serial.println(rxField(44, 51));
-  uint8_t want = checksumFor(rxField(4, 12), rxField(16, 24), rxField(44, 51));
+  uint8_t want = checksumFor(rxField(4, 12), rxField(16, 24), rxField(32, 44), rxField(44, 51));
   Serial.print(F("<< nibble checksum: rule says "));
   Serial.print(want);
   Serial.println((rxField(12, 16) & 0x07) == want ? F(" - MATCH") : F(" - MISMATCH!"));
@@ -457,32 +470,31 @@ void setup() {
   dataRelease();
 #if USE_LEVEL_EXP_INTERFACE
   solveLevelExp(MONSTER_NUM - 1, toBcd(MONSTER_HP), TARGET_LEVEL, TARGET_EXP,
-                MONSTER_EXP, MONSTER_NIBBLE);
+                MONSTER_ZEROS, MONSTER_EXP, MONSTER_NIBBLE);
   Serial.print(F("solved for target level="));
   Serial.print(TARGET_LEVEL);
   Serial.print(F(" EXP="));
   Serial.print(TARGET_EXP);
-  Serial.print(F(" -> sent EXP="));
+  Serial.print(F(" -> zeros=0x"));
+  Serial.print(MONSTER_ZEROS, HEX);
+  Serial.print(F(" (monster menu should show EXP "));
+  Serial.print(fromBcd3(MONSTER_ZEROS) * 10);
+  Serial.print(F(") smallExp="));
   Serial.print(MONSTER_EXP);
   Serial.print(F(" nibble="));
-  Serial.print(MONSTER_NIBBLE);
-  Serial.print(F(" (monster-menu \"EXP\" stat is proven to show floor(sentEXP/8) = "));
-  Serial.print(MONSTER_EXP / 8);
-  Serial.println(F(" for this field - may not be the real experience counter)"));
+  Serial.println(MONSTER_NIBBLE);
 #endif
-  if (MONSTER_ZEROS != 0) {
-    Serial.print(F("probing zeros field: sending 0x"));
-    Serial.println(MONSTER_ZEROS, HEX);
-  }
   buildTxPayload();
   Serial.println(F("Skannerz slave emulator"));
   Serial.print(F("sending monster num="));
   Serial.print(MONSTER_NUM);
   Serial.print(F(" nibble="));
-  Serial.print(nibbleFor(MONSTER_NUM - 1, toBcd(MONSTER_HP), MONSTER_EXP));
+  Serial.print(nibbleFor(MONSTER_NUM - 1, toBcd(MONSTER_HP), MONSTER_ZEROS, MONSTER_EXP));
   Serial.print(F(" HP="));
   Serial.print(MONSTER_HP);
-  Serial.print(F(" EXP="));
+  Serial.print(F(" zeros(realEXP/10 BCD)=0x"));
+  Serial.print(MONSTER_ZEROS, HEX);
+  Serial.print(F(" smallExp="));
   Serial.println(MONSTER_EXP);
   Serial.print(F(">> tx payload: "));
   printPayloadBits(txBits);

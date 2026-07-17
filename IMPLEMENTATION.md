@@ -158,21 +158,22 @@ For monster number byte `B` (= displayed identity via an unknown mapping;
 
 ```
 def digit_sum(x): return (x >> 4) + (x & 0x0F)
+def digit_sum3(x): return (x >> 8 & 0xF) + (x >> 4 & 0xF) + (x & 0xF)  # 3 hex nibbles
 
-hp_bcd   = (HP // 10) * 16 + HP % 10                     # BCD! binary HP -> ERROR
-exp_term = (EXP % 8) - (EXP // 8)
-check    = (-digit_sum(B) - 2 * digit_sum(hp_bcd) + exp_term) % 8  # checksum over B, hp_bcd, EXP
+hp_bcd    = (HP // 10) * 16 + HP % 10                    # BCD! binary HP -> ERROR
+zeros_bcd = ((REAL_EXP // 10) // 100) << 8 \
+          | ((REAL_EXP // 10) // 10 % 10) << 4 \
+          | ((REAL_EXP // 10) % 10)                       # 3-digit BCD of REAL_EXP/10
+exp_term  = (EXP % 8) - (EXP // 8)
+check     = (-digit_sum(B) - 2*digit_sum(hp_bcd) - digit_sum3(zeros_bcd) + exp_term) % 8
 bits  = '0'                      # start
       + '111'                    # sync
       + f'{B:08b}'               # monster number byte
       + f'{check:04b}'           # checksum nibble - wrong value -> ERROR (only low 3 bits checked)
       + f'{hp_bcd:08b}'          # HP, BCD
       + f'{hp_bcd:08b}'          # HP again (duplicate)
-      + f'{ZEROS:012b}'          # unknown; 0 in every capture so far, but the
-                                  # leading suspect for the toy's REAL persistent
-                                  # experience counter - see the note below
-      + f'{EXP:07b}'             # a win-counter-like field, but its own menu
-                                  # readout caps at 15 - may not be real EXP
+      + f'{zeros_bcd:012b}'      # the REAL experience counter, 3-digit BCD, displayed x10
+      + f'{EXP:07b}'             # NOT experience - just a small checksum-satisfying knob
       + '1'                      # stop
 ```
 
@@ -206,46 +207,40 @@ game data never produces; treat nibble 12–15 as out-of-spec, not a 4th
 tier.
 
 Rather than hand-deriving raw wire values for a target level, the sketch
-exposes `TARGET_LEVEL` (1..3) and `TARGET_EXP` (0..127) directly.
-**CAUTION, reopened 2026-07-17**: `TARGET_EXP`'s own menu readout (only
-visible in the toy's monster menu, never during a trade) is proven to be
-`rawEXP // 8`, capped at 15 no matter what's sent — but the manual
-describes real experience as an accumulating, non-transferable,
-battle-won stat that visibly exceeds 15 in normal play. That's a direct
-contradiction, so `TARGET_EXP` is **not confirmed** to be the same
-counter the monster menu shows for locally-raised monsters; it's
-possibly a different, deliberately-capped stat. The likelier home for
-the real counter is the previously-untouched 12 "zeros" bits — see
-`MONSTER_ZEROS` below, an active, not-yet-hardware-tested probe.
-`solveLevelExp()` works out the wire EXP + nibble in `setup()`: it sends
-`TARGET_EXP` exactly if that already lands on the checksum band
-`TARGET_LEVEL` needs, otherwise it nudges only the low 3 bits (searching
-within the same `EXP/8` "tens" bucket, which always contains a match —
-proven exhaustively) to the closest value that does, so the sent EXP
-never drifts more than a few units from what was asked and refuses
-`TARGET_LEVEL=4`. Set `USE_LEVEL_EXP_INTERFACE 0` to fall back to setting
-`MONSTER_EXP`/`MONSTER_NIBBLE` by hand for lower-level experiments (e.g.
-deliberately probing the level-4 glitch).
-
-`MONSTER_ZEROS` (0..4095) sends an explicit value in the 12 previously-
-always-zero bits, for testing whether that's where the real experience
-counter lives. To test: set `MONSTER_ZEROS` to something recognizable
-(e.g. 30) and `MONSTER_EXP`/`TARGET_EXP` to something clearly different
-(e.g. 0), trade, then check the monster menu (not the trade screen).
-If it reads "30", the zeros field is the real counter and the 7-bit
-`EXP` field is something else; if it still reads whatever `TARGET_EXP`'s
-`//8` predicts, the zeros field is inert and the real counter is
-elsewhere entirely (not yet identified).
+exposes `TARGET_LEVEL` (1..3) and `TARGET_EXP` (0..9990) directly, where
+`TARGET_EXP` is the **real, persistent experience counter** — solved
+2026-07-18 after a wrong turn: the 7-bit `EXP` field looked like a
+plausible fit (round-trips bit-exact, has a clean `//8` display formula)
+until its readout proved to be mathematically capped at 15, which can't
+be the manual's exceeds-15, non-transferable battle counter. The real
+counter turned out to be the 12 "zeros" bits, sent as all-zero in every
+capture and test before this session not because they're unused but
+because 3-digit BCD naturally reads as `000` when nothing's been
+recorded there. Confirmed by two real-toy tests: BCD `030` (wire 0x030)
+displayed monster-menu EXP 300; BCD `003` (wire 0x003) displayed EXP 30
+— exactly 10× the decoded value both times. `TARGET_EXP` must be a
+multiple of 10 (finer resolution isn't representable); `solveLevelExp()`
+rounds down and warns if not. It also derives the small 7-bit `EXP`
+field's value (kept in 0..7, where its own display contribution is
+always 0 - confirmed not to disturb the zeros-driven readout) purely to
+satisfy the checksum's `TARGET_LEVEL` band, and refuses `TARGET_LEVEL=4`.
+Set `USE_LEVEL_EXP_INTERFACE 0` to fall back to setting
+`MONSTER_ZEROS`/`MONSTER_EXP`/`MONSTER_NIBBLE` by hand for lower-level
+experiments (e.g. deliberately probing the level-4 glitch, or sending
+zeros as plain binary to reproduce the pre-BCD-fix garbage display).
 
 The checksum formula above is fully solved, including the EXP term —
 `exp_term(9) == 0` is exactly why every earlier NUM/HP experiment
-"just worked" while EXP sat at the emulator's default of 9. The EXP
-*display* stat (separate from Level, and separate from the checksum) is
-also solved: `EXP // 8`, floor division — proven by a real-toy sweep at
-EXP = 9/16/21/64/112/128 (truncates to 0 on the wire), all exact; a
-BCD-decode theory was tested and refuted (EXP=16 decodes to BCD 10,
-predicting display 1, but the toy showed 2). Field width (7 vs 8 bit) is
-still open.
+"just worked" while EXP sat at the emulator's default of 9 — and the
+zeros term, added 2026-07-18, has the same "silently zero" property
+(`digitSum3(0) == 0`), which is why it took until zeros was deliberately
+set nonzero to notice it feeds the checksum at all. The small EXP
+field's *own* display stat (separate from Level, separate from the real
+experience counter above) is also solved: `EXP // 8`, floor division —
+proven by a real-toy sweep at EXP = 9/16/21/64/112/128 (truncates to 0
+on the wire), all exact; a BCD-decode theory was tested and refuted
+(EXP=16 decodes to BCD 10, predicting display 1, but the toy showed 2).
+Field width (7 vs 8 bit) is still open.
 
 Note HP=0 is untested; the display flow suggests HP ≥ 1. HP=99 is the
 ceiling `hp_bcd` above can express without producing a non-BCD byte —
