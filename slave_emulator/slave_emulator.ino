@@ -72,26 +72,28 @@ const uint8_t PIN_DATA = 3;
  * high as MONSTER_HP can go through toBcd() without producing an
  * invalid (non-BCD) byte, so it's untested whether the toy enforces any
  * ceiling beyond BCD validity itself.
- * The REAL persistent experience counter is 3-digit BCD packed into the
- * 12 "zeros" bits (wire bits 32-43), displayed as 10x its decoded value
- * - confirmed 2026-07-18: zeros=BCD"030" showed monster-menu EXP 300;
- * zeros=BCD"003" showed EXP 30. It also feeds the checksum (see
- * checksumFor() below): nibble_low3 -= digitSum3(zeros), confirmed 3/3
- * by predicting the accepted nibble ahead of testing for two different
- * zeros values. Sending zeros as plain binary instead of BCD (e.g. 30
- * as 0b000000011110, nibbles 0/1/14 - 14 isn't a valid decimal digit)
- * doesn't error, it just produces garbage (observed: displayed EXP
- * 1140) - so this field isn't BCD-validated the strict way HP is.
- * The 7-bit "EXP" field is NOT the real experience counter - that was
- * the original assumption (round-trips bit-exact: 127 sent came back as
- * 127; its own monster-menu readout is EXP/8, floor, confirmed 14/14 -
- * see analysis/nibble_rule.py) but it's capped at 15 no matter what's
- * sent, which can't be real battle-won experience (confirmed exceeding
- * 15 in normal play, and shouldn't be trade-transferable per the
- * manual). It's now used purely as a small checksum-satisfying knob
- * (solveLevelExp() keeps it in 0..7, where its display contribution is
- * always floor(exp/8)==0, confirmed not to disturb the zeros-driven
- * display). Level is NOT EXP/30+1 as the manual implies - see the
+ * The REAL persistent experience counter SPANS TWO FIELDS, confirmed
+ * 2026-07-18/19: `displayedEXP = 10*decodeBcd3(zeros) + (EXP / 8)`.
+ * The 12 "zeros" bits (wire bits 32-43) are 3-digit BCD holding the
+ * tens-and-up part (zeros=BCD"030" showed EXP 300; zeros=BCD"003"
+ * showed EXP 30 - the original single-field theory, since refined).
+ * The 7-bit EXP field's own `EXP / 8` (0..15, confirmed 14/14 by the
+ * ORIGINAL EXP-alone sweep before zeros was discovered) is the ONES
+ * digit, additive with the zeros term - confirmed by zeros=BCD"003"
+ * with EXP=2 (EXP/8=0) still showing exactly 30, and the formula
+ * fitting all 4 known data points (including the original zeros=0,
+ * EXP=64->8 point) with zero free parameters. Since EXP/8 ranges 0..15,
+ * not just 0..9, any exact integer 0..9999 is reachable with NO
+ * rounding: split target = 10*Z + R (R = target%10, Z = target/10),
+ * BCD-encode Z into zeros, and pick EXP = (R<<3)|low3 for any low3
+ * 0..7 - EXP's low 3 bits are still fully free for the checksum
+ * (varying them doesn't change EXP/8). Zeros also feeds the checksum
+ * (see checksumFor() below): nibble_low3 -= digitSum3(zeros), confirmed
+ * 3/3 by predicting the accepted nibble ahead of testing. Sending zeros
+ * as plain binary instead of BCD (e.g. 30 as 0b000000011110, nibbles
+ * 0/1/14 - 14 isn't a valid decimal digit) doesn't error, it produces
+ * garbage (observed: displayed EXP 1140) - so this field isn't
+ * BCD-validated the strict way HP is. Level is NOT EXP/30+1 as the
  * nibble note above. */
 const uint8_t MONSTER_NUM    = 138;   // wire byte = NUM-1
 const uint8_t MONSTER_HP     = 63;   // 1..99 (BCD-encoded by the sketch; ceiling above 99 untested)
@@ -106,22 +108,22 @@ const uint8_t MONSTER_HP     = 63;   // 1..99 (BCD-encoded by the sketch; ceilin
 #define USE_LEVEL_EXP_INTERFACE 1
 
 #if USE_LEVEL_EXP_INTERFACE
-const uint8_t  TARGET_LEVEL = 2;   // 1..3 - the level the toy should show.
+const uint8_t  TARGET_LEVEL = 3;   // 1..3 - the level the toy should show.
                                     // 4 is a real wire value but not a real
                                     // game one (see header comment); refused.
-const uint16_t TARGET_EXP   = 30;  // 0..9990 - the REAL experience counter
-                                    // (confirmed 2026-07-18, see header
-                                    // comment). Must be a multiple of 10 -
-                                    // the BCD field can't express finer
-                                    // resolution; non-multiples are rounded
-                                    // down with a warning at boot.
+const uint16_t TARGET_EXP   = 95;  // 0..9999 - the REAL experience counter,
+                                    // ANY exact integer (see header comment -
+                                    // it spans the zeros field's tens-and-up
+                                    // BCD digits plus the EXP field's ones
+                                    // digit, no rounding needed).
 #endif
 
-uint16_t MONSTER_ZEROS = 0;    // 0..4095 (3-digit BCD = real EXP/10);
-                               // overwritten by solveLevelExp() in setup()
-                               // if USE_LEVEL_EXP_INTERFACE is 1
-uint8_t MONSTER_EXP    = 0;    // raw 0..127; NOT the real EXP counter (see
-                               // header comment) - just a checksum knob.
+uint16_t MONSTER_ZEROS = 0;    // 0..4095 (3-digit BCD = tens-and-up of real
+                               // EXP); overwritten by solveLevelExp() in
+                               // setup() if USE_LEVEL_EXP_INTERFACE is 1
+uint8_t MONSTER_EXP    = 0;    // raw 0..127; top 4 bits (EXP>>3) are the real
+                               // EXP's ones digit, low 3 bits are a free
+                               // checksum knob (see header comment).
                                // Overwritten the same way as MONSTER_ZEROS
 uint8_t MONSTER_NIBBLE = 0xFF; // 0xFF = auto (checksum rule); 0..15 forces
                                // a value; overwritten the same way too
@@ -304,42 +306,38 @@ static uint8_t nibbleFor(uint8_t numByte, uint8_t hpBcd, uint16_t zerosBcd, uint
 }
 
 /* Given NUM/HP and a desired (Level, EXP) pair, work out the raw wire
- * zeros/EXP/nibble that produce them (2026-07-17/07-18 findings). The
- * REAL persistent experience counter is 3-digit BCD in the "zeros"
- * field, displayed as 10x its decoded value - see the header comment.
- * targetExp must be a multiple of 10 (the BCD field can't express finer
- * resolution); non-multiples are rounded down with a warning.
+ * zeros/EXP/nibble that produce them (2026-07-17 through 07-19
+ * findings). The REAL persistent experience counter SPANS TWO FIELDS -
+ * see the header comment: displayedEXP = 10*decodeBcd3(zeros) + EXP/8.
+ * No rounding is needed for any exact integer 0..9999: split
+ * targetExp = 10*Z + R (Z = targetExp/10 goes into zeros as 3-digit
+ * BCD, R = targetExp%10 goes into EXP's top 4 bits, EXP>>3). EXP's low
+ * 3 bits are still fully free - they don't affect EXP/8, only the
+ * checksum - and cycle through all 8 checksum residues regardless of R
+ * (expTerm(exp) = low3 - R is 8 consecutive integers as low3 sweeps
+ * 0..7, always a complete residue system mod 8), so any Level is
+ * reachable without perturbing the displayed experience at all.
  * Level = (nibble>>2)+1: the nibble's low 3 bits are pinned by
- * checksumFor(), only the top bit is free. With zeros fixed by
- * targetExp, only 2 of the 3 real levels are directly reachable there -
- * but the small EXP field's low 3 bits (0..7) cycle through all 8
- * checksum residues (expTerm(exp)==exp for exp<8), so any level is
- * reachable without perturbing zeros or its 10x-scaled display; EXP
- * stays in 0..7 throughout, where its own display contribution
- * (floor(exp/8)) is always 0 - confirmed not to disturb the
- * zeros-driven readout. Level 4 is a real wire value (see header
- * comment) but not a real game one, so it's refused here. */
+ * checksumFor(), only the top bit is free (0 for level 1/2, 1 doubles
+ * as level 3's "+8 twin" of level 1). Level 4 is a real wire value (see
+ * header comment) but not a real game one, so it's refused here. */
 static void solveLevelExp(uint8_t numByte, uint8_t hpBcd, uint8_t level, uint16_t targetExp,
                            uint16_t &outZeros, uint8_t &outExp, uint8_t &outNibble) {
   if (level < 1 || level > 3) {
     Serial.println(F("TARGET_LEVEL must be 1..3 (4 is an invalid glitch value) - halting"));
     while (true) {}
   }
-  if (targetExp > 9990) {
-    Serial.println(F("TARGET_EXP must be 0..9990 - halting"));
+  if (targetExp > 9999) {
+    Serial.println(F("TARGET_EXP must be 0..9999 - halting"));
     while (true) {}
   }
-  if (targetExp % 10 != 0) {
-    Serial.print(F("TARGET_EXP "));
-    Serial.print(targetExp);
-    Serial.print(F(" isn't a multiple of 10 (the real counter can't represent that) - rounding down to "));
-    targetExp = (targetExp / 10) * 10;
-    Serial.println(targetExp);
-  }
-  outZeros = toBcd3(targetExp / 10);
+  uint16_t Z = targetExp / 10;   // -> zeros, 3-digit BCD
+  uint8_t  R = targetExp % 10;   // -> EXP's top 4 bits (EXP>>3)
+  outZeros = toBcd3(Z);
   uint8_t band   = (level == 2) ? 1 : 0;  // level 1/3 -> band 0, level 2 -> band 1
   uint8_t topBit = (level == 3) ? 1 : 0;  // level 3 is level 1's "+8 twin"
-  for (uint8_t exp = 0; exp < 8; exp++) {
+  for (uint8_t low3 = 0; low3 < 8; low3++) {
+    uint8_t exp = (R << 3) | low3;
     uint8_t c = checksumFor(numByte, hpBcd, outZeros, exp);
     if ((c >> 2) == band) {
       outExp    = exp;
@@ -477,11 +475,11 @@ void setup() {
   Serial.print(TARGET_EXP);
   Serial.print(F(" -> zeros=0x"));
   Serial.print(MONSTER_ZEROS, HEX);
-  Serial.print(F(" (monster menu should show EXP "));
-  Serial.print(fromBcd3(MONSTER_ZEROS) * 10);
-  Serial.print(F(") smallExp="));
+  Serial.print(F(" smallExp="));
   Serial.print(MONSTER_EXP);
-  Serial.print(F(" nibble="));
+  Serial.print(F(" (monster menu should show EXP "));
+  Serial.print(fromBcd3(MONSTER_ZEROS) * 10 + MONSTER_EXP / 8);
+  Serial.print(F(") nibble="));
   Serial.println(MONSTER_NIBBLE);
 #endif
   buildTxPayload();

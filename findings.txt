@@ -138,11 +138,34 @@ Right call. Sequence of real-toy tests that found the actual counter:
    Confirms: real experience = 3-digit BCD in the zeros field, x10.
 
 Formula: zeros = BCD(realEXP/10) (hundreds,tens,ones nibbles), checksum
-term -digitSum3(zeros). realEXP must be a multiple of 10 - no finer
-resolution found. The old 7-bit "EXP" field (EXP//8 display, capped at
-15) is NOT the real counter - it's now just a small checksum-satisfying
-knob (solveLevelExp() keeps it 0..7, confirmed not to disturb the
-zeros-driven display). slave_emulator.ino's TARGET_LEVEL/TARGET_EXP
-interface was rewritten around this - TARGET_EXP is now 0..9990 and
-means the real value, not the old field's raw 0..127.
-See analysis/nibble_rule.py ZEROS_TESTS/real_exp_display().
+term -digitSum3(zeros). slave_emulator.ino's TARGET_LEVEL/TARGET_EXP
+interface was rewritten around this - TARGET_EXP became 0..9990 meaning
+the real value, not the old field's raw 0..127. Set MONSTER_NIBBLE/EXP
+to 0 by default in this version, so EXP//8 was always 0 in every test
+above.
+
+2026-07-19: user pointed out the sketch shouldn't need to round
+TARGET_EXP to a multiple of 10 - real experience should be settable
+exactly. Right call, and traced to a detail overlooked above: the LAST
+zeros test (level=2, EXP=30 via the new auto interface) used smallExp=2
+(not 0, chosen automatically to satisfy the checksum) and STILL showed
+exactly 30, not 32. Checked all 4 known real-toy points against
+displayedEXP = 10*decodeBcd3(zeros) + (EXP//8):
+
+  zeros=0,        exp=64 -> 8    (10*0 + 64//8 = 8)      [pre-dates zeros]
+  zeros=BCD"030",  exp=0 -> 300  (10*30 + 0 = 300)
+  zeros=BCD"003",  exp=0 -> 30   (10*3 + 0 = 30)
+  zeros=BCD"003",  exp=2 -> 30   (10*3 + 2//8 = 30)
+
+All 4 fit exactly, zero free parameters. So EXP//8 (originally found as
+the small field's own "separate, capped at 15" stat) is actually the
+ONES digit of the real counter, additive with zeros's tens-and-up - not
+a separate stat at all, and not just a checksum knob. Since EXP//8
+ranges 0..15 (not just 0..9), ANY exact integer 0..9999 is reachable
+with no rounding: target = 10*Z + R, Z (0..999) -> zeros as 3-digit
+BCD, R (0..9) -> EXP's top 4 bits (EXP = R<<3 | low3), low3 (0..7)
+still fully free for the checksum regardless of R. Verified:
+TARGET_LEVEL=3, TARGET_EXP=95 -> zeros=0x9, smallExp=41, nibble=8 ->
+ACCEPTED, monster menu shows EXP 95 exactly.
+See analysis/nibble_rule.py ZEROS_TESTS/real_exp_display() (now takes
+an exp param) and slave_emulator.ino's solveLevelExp().

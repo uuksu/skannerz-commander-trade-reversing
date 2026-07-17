@@ -250,48 +250,45 @@ Field semantics (capture + 2026-07-16 emulator-vs-real-toy testing):
   BCD == binary there, which is why the capture alone couldn't reveal
   the encoding. Both samples identical — likely redundancy, possibly
   (current, max). Send the same value in both.
-- **zeros (12 bit) — FULLY SOLVED 2026-07-18: this is the real, persistent
-  experience counter**, not padding. Zero in both original captures and
-  every test before this session because no real monster in those
-  captures needed to express anything here beyond what its low-order
-  digits already covered — not because the field is unused. It's
-  **3-digit BCD, displayed as 10× its decoded value**:
-  `zeros = BCD(realEXP / 10)`, i.e. `hi_nibble..lo_nibble = hundreds,
-  tens, ones` of `realEXP/10`. Proven by two real-toy tests: `zeros =
-  BCD"030"` (wire value 0x030) displayed monster-menu EXP **300**;
-  `zeros = BCD"003"` (wire value 0x003) displayed EXP **30** — exactly
-  10× the decoded value both times. Sending zeros as **plain binary**
-  instead of BCD (e.g. 30 as `0b000000011110`, which reads as hex
-  nibbles 0/1/14 — 14 isn't a valid decimal digit) does not ERROR, it
-  produces garbage (observed: displayed EXP **1140**) — so this field is
-  not BCD-validated the strict way HP is; only its checksum contribution
-  (below) is checked, not whether its nibbles are valid decimal digits.
-  It also feeds the checksum: `−digitSum3(zeros)`, where `digitSum3` is
-  the sum of the value's 3 hex nibbles (see §3.5's `check` field) —
-  confirmed 3/3 by predicting the accepted nibble ahead of testing for
-  two different zeros values. Real experience is only expressible in
-  multiples of 10 through this field (no finer resolution found);
-  `slave_emulator.ino`'s `TARGET_EXP`/`solveLevelExp()` (rewritten
-  2026-07-18) is the interface — set the real 0..9990 value you want and
-  it derives `MONSTER_ZEROS` directly, no manual BCD math needed.
-- **EXP (7 bit)**: **NOT the real experience counter** — that was the
-  original, reasonable-sounding assumption (matches the manual's
-  "winning-battle counter" language) but is refuted by the field above.
-  Raw binary, round-trips bit-exact (an injected EXP=127 was re-sent 127
-  unchanged). Its own monster-menu readout (separate from the real
-  experience shown via zeros) is `EXP // 8` (floor division), proven
-  14/14 exact against a formula with zero free parameters — but capped
-  at `127 // 8 = 15` no matter what's sent, since it's only 7 wire bits,
-  which can't be the manual's persistent, non-transferable, exceeds-15
-  counter. What this field's own display *is* (if not experience) is
-  unresolved and not a priority now that the real counter is found;
-  `slave_emulator.ino` uses it purely as a small (0..7) checksum-
-  satisfying knob for hitting a requested Level, a role confirmed not to
-  disturb the zeros-driven display (`floor(exp/8)==0` for all of 0..7).
-  This field is *not* what the toy displays as "Level" either — that
-  comes from the checksum nibble (see §3.5's `check` field). Field width
-  7 vs 8 bits (44–51 with no stop bit) still ambiguous from the capture
-  alone (the sketch only ever transmits 7 bits).
+- **zeros (12 bit) + EXP (7 bit) — FULLY SOLVED 2026-07-18/19: TOGETHER
+  they form the real, persistent experience counter.** Zero in both
+  original captures and every test before this discovery not because
+  either field is unused, but because 3-digit BCD naturally reads as 0
+  and `0 // 8` is 0. The combined formula, fit with **zero free
+  parameters to all 4 known data points including the original
+  zeros=0/EXP=64→8 case**:
+
+  ```
+  displayedEXP = 10 × decodeBcd3(zeros) + (EXP // 8)
+  ```
+
+  `zeros` is **3-digit BCD** (`hi..lo nibble = hundreds, tens, ones` of
+  `displayedEXP // 10`) — proven by `zeros = BCD"030"` → EXP 300 and
+  `zeros = BCD"003"` → EXP 30, exactly 10× the decoded value.
+  `EXP // 8` (0..15) is the **ones digit** — this is the same formula
+  originally found for EXP *alone* (14/14 exact, back when zeros was
+  always 0 and this term looked like the whole story); confirmed
+  additive by `zeros = BCD"003"`, `EXP = 2` (`EXP//8 = 0`) still showing
+  exactly 30, not 32. Because `EXP // 8` ranges 0–15, not just 0–9, **no
+  target integer 0..9999 needs rounding**: split `target = 10·Z + R`
+  (`Z = target // 10` → BCD into zeros, `R = target % 10` → `EXP`'s top
+  4 bits, `EXP = (R<<3) | low3`), and `EXP`'s low 3 bits remain fully
+  free for the checksum regardless of `R` (cycle through all 8 residues
+  the same way). `zeros` also feeds the checksum: `−digitSum3(zeros)`
+  (sum of its 3 hex nibbles), confirmed 3/3 by predicting the accepted
+  nibble ahead of testing. Sending zeros as **plain binary** instead of
+  BCD (e.g. 30 as `0b000000011110`, hex nibbles 0/1/14 — 14 isn't a
+  valid decimal digit) does not ERROR, it produces garbage (observed:
+  displayed EXP **1140**) — so `zeros` isn't BCD-validated the strict
+  way HP is; only its checksum contribution is checked. Both fields
+  round-trip bit-exact on the wire (an injected EXP=127 was re-sent 127
+  unchanged). Neither is what the toy displays as "Level" — that's the
+  checksum nibble (see §3.5's `check` field). `slave_emulator.ino`'s
+  `TARGET_EXP`/`solveLevelExp()` (rewritten 2026-07-19) is the
+  interface — set the exact 0..9999 value you want and it derives
+  `MONSTER_ZEROS`/`MONSTER_EXP` directly, no manual math needed. Field
+  width for EXP (7 vs 8 bits, 44–51 with no stop bit) still ambiguous
+  from the capture alone (the sketch only ever transmits 7 bits).
 - **No checksum**: the trailing bits do not depend on NUM/HP (exhaustive
   CRC-8/CRC-16, weighted sums, nibble sums all fail; the two captures and
   all accepted emulator payloads are consistent with independent fields).
@@ -363,29 +360,29 @@ switch is inferred from timing against the known user flow.
 
 - Reject / cancel byte codes (need a capture of a refused trade).
 - Meaning of the master frame's 1-cycle low trailer.
-- ~~Real experience counter~~ SOLVED 2026-07-18: it's the 12 "zeros"
-  bits, 3-digit BCD, displayed as 10× the decoded value — see §3.5's
-  `zeros` entry. The 7-bit "EXP" field's own `EXP // 8` menu readout
-  (SOLVED 2026-07-17) is a real, separate, still-unidentified stat, not
-  experience — its ceiling-at-15 contradiction is what led to finding
-  the zeros field. Field width for the small EXP field (7 vs 8 bit, bits
-  44–51 with no stop bit) still ambiguous from the capture alone.
+- ~~Real experience counter~~ SOLVED 2026-07-18/19: it SPANS both the
+  12 "zeros" bits (3-digit BCD, tens-and-up) and the 7-bit EXP field
+  (`EXP // 8`, the ones digit, additive) — see §3.5's combined entry.
+  What looked like the small EXP field's own separate, capped-at-15 stat
+  (SOLVED 2026-07-17) turned out to be exactly half of the real formula
+  all along; the "cap" was never real, it was just the low-order digit
+  of a number nobody had varied the high-order part of yet. Field width
+  for the small EXP field (7 vs 8 bit, bits 44–51 with no stop bit)
+  still ambiguous from the capture alone.
 - ~~"Level"~~ SOLVED 2026-07-17 (see §3.5's `check` field):
   `(nibble>>2)+1` over the full 4-bit field, real ceiling **level 3**
   (level 4 is a wire-reachable but non-game glitch value — the checksum
   only validates 3 of the 4 bits, so it doesn't reject it, but real game
   data never produces it). `slave_emulator.ino`'s `TARGET_LEVEL` (1..3) +
-  `TARGET_EXP` (0..9990, the real experience counter — see §3.5's
-  `zeros` entry) + `solveLevelExp()` (rewritten 2026-07-18) is the
-  interface for building a monster by desired stats instead of raw wire
-  fields; it refuses `TARGET_LEVEL=4`, rounds `TARGET_EXP` down to the
-  nearest multiple of 10 if needed, and picks the small EXP field's
-  value (kept in 0..7, confirmed not to disturb the displayed
-  experience) to hit the requested level exactly without perturbing the
-  zeros-encoded experience value at all. Still open: is this
-  nibble-derived field literally the toy's internal progression stat, or
-  a separate trade-preview-only indicator that happens to share the
-  "Level" name with a deeper system not exposed on this wire at all?
+  `TARGET_EXP` (0..9999, the exact real experience counter, no rounding
+  — see §3.5's combined entry) + `solveLevelExp()` (rewritten
+  2026-07-19) is the interface for building a monster by desired stats
+  instead of raw wire fields; it refuses `TARGET_LEVEL=4` and picks the
+  EXP field's low 3 bits (free without affecting `EXP // 8`, hence the
+  displayed experience) to hit the requested level exactly. Still open:
+  is this nibble-derived field literally the toy's internal progression
+  stat, or a separate trade-preview-only indicator that happens to share
+  the "Level" name with a deeper system not exposed on this wire at all?
 - HP ceiling (see §3.5): BCD 99 confirmed accepted (game UI breaks, wire
   doesn't care); whether the toy enforces any cap beyond BCD validity
   itself (i.e. anything reachable only via a non-standard, non-BCD wire

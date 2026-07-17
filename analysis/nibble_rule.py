@@ -88,12 +88,23 @@ checked. Full checksum formula, extending the one above:
     nibble = (-digitSum(numByte) - 2*digitSum(bcd(HP)) - digitSum3(zeros)
               + expTerm) mod 8
 
-The 7-bit EXP field above is NOT the real experience counter (the
-original, reasonable-sounding assumption, refuted by the discovery
-above) - its own `EXP // 8` menu display is real but capped at 15,
-which can't be the manual's exceeds-15 counter. It's now used purely as
-a small (0..7) checksum-satisfying knob for hitting a requested Level
-without touching the zeros-encoded real experience value.
+REFINED 2026-07-19: the real experience counter isn't zeros ALONE - it
+SPANS zeros and the 7-bit EXP field, additively:
+
+    displayedEXP = 10 * decodeBcd3(zeros) + (EXP // 8)
+
+`EXP // 8` (0..15) was originally found as the small EXP field's own,
+seemingly-separate "capped at 15" display stat (14/14 exact when zeros
+was always 0) - it's actually the ONES digit of the real counter, with
+zeros providing the tens-and-up. Confirmed additive by zeros=BCD"003"
+with EXP=2 (EXP//8=0) still displaying exactly 30, not 32 - and the
+single formula above fits all 4 known data points (including the
+original zeros=0/EXP=64->8 result) with zero free parameters. Because
+EXP//8 ranges 0..15 (not just 0..9), ANY exact integer 0..9999 is
+reachable with no rounding: split target = 10*Z + R (Z -> zeros as
+3-digit BCD, R -> EXP's top 4 bits, EXP = (R<<3)|low3), and low3 (0..7)
+stays fully free for the checksum regardless of R (see
+slave_emulator.ino's solveLevelExp()).
 """
 from itertools import combinations, product
 
@@ -193,12 +204,14 @@ def full_rule(b, hp_bcd, exp, zeros=0):
     return (-digit_sum(b) - 2 * digit_sum(hp_bcd) - digit_sum3(zeros) + exp_term) & 7
 
 
-def real_exp_display(zeros):
+def real_exp_display(zeros, exp=0):
     """The toy's actual persistent experience readout. Cracked
-    2026-07-18: zeros is 3-digit BCD, displayed as 10x its decoded
-    value - confirmed at zeros=BCD"030"->300 and zeros=BCD"003"->30."""
+    2026-07-18 (zeros term) and refined 2026-07-19 (additive exp term):
+    zeros is 3-digit BCD (tens-and-up, x10); exp//8 is the ones digit.
+    Fits all 4 known real-toy points with zero free parameters, incl.
+    the original zeros=0/exp=64->8 result from the pre-zeros era."""
     decoded = ((zeros >> 8) & 0xF) * 100 + ((zeros >> 4) & 0xF) * 10 + (zeros & 0xF)
-    return decoded * 10
+    return decoded * 10 + exp // 8
 
 
 def level_from_nibble(nibble):
@@ -238,12 +251,16 @@ EXP_DISPLAY_TESTS = [  # real-toy readings, 2026-07-17
     dict(exp=9, shown=1), dict(exp=16, shown=2), dict(exp=21, shown=2),
     dict(exp=64, shown=8), dict(exp=112, shown=14), dict(exp=0, shown=0),
 ]
-ZEROS_TESTS = [  # fixed b=0x89 (num 138), hp=0x63, exp=0; real-toy, 2026-07-18
+ZEROS_TESTS = [  # fixed b=0x89 (num 138), hp=0x63; real-toy, 2026-07-18/19
     # plain-binary zeros=30 (invalid BCD, nibbles 0/1/14) with the OLD
     # zeros-less checksum (nibble=5) -> ERROR; not included here since
     # it's a negative/garbage result, not a clean (zeros,nibble) pair.
-    dict(zeros=0x030, nibble=2, shown=300),  # BCD "030"
-    dict(zeros=0x003, nibble=2, shown=30),   # BCD "003" - same digit sum as above
+    dict(zeros=0x030, exp=0, nibble=2, shown=300),  # BCD "030"
+    dict(zeros=0x003, exp=0, nibble=2, shown=30),   # BCD "003" - same digit sum as above
+    dict(zeros=0x003, exp=2, nibble=4, shown=30),   # exp=2 (exp//8=0) - confirms additive,
+                                                     # not "zeros overrides exp" - still 30, not 32
+    # 4th confirming point: the ORIGINAL zeros=0/exp=64->8 result (pre-dates
+    # zeros discovery, see EXP_DISPLAY_TESTS) also fits the combined formula.
 ]
 # fmt: on
 
@@ -320,11 +337,14 @@ def main():
           f"{'fits all data' if oke else 'REFUTED'}")
 
     okz_check = all(
-        full_rule(0x89, 0x63, 0, zeros=t["zeros"]) == t["nibble"] for t in ZEROS_TESTS)
-    okz_disp = all(real_exp_display(t["zeros"]) == t["shown"] for t in ZEROS_TESTS)
+        full_rule(0x89, 0x63, t["exp"], zeros=t["zeros"]) == t["nibble"] for t in ZEROS_TESTS)
+    okz_disp = all(real_exp_display(t["zeros"], t["exp"]) == t["shown"] for t in ZEROS_TESTS)
+    okz_combined = real_exp_display(0, 64) == 8  # the original pre-zeros-era point still fits
     print(f"ZEROS checksum term -digitSum3(zeros), {len(ZEROS_TESTS)} real-toy nibbles: "
           f"{'fits' if okz_check else 'REFUTED'}")
-    print(f"ZEROS display rule 10*BCD3(zeros) (the REAL experience counter), "
+    print(f"Combined display formula also fits the original zeros=0/exp=64 point: "
+          f"{'fits' if okz_combined else 'REFUTED'}")
+    print(f"Combined display rule 10*BCD3(zeros)+exp//8 (the REAL experience counter), "
           f"{len(ZEROS_TESTS)} samples: {'fits all data' if okz_disp else 'REFUTED'}")
 
 
