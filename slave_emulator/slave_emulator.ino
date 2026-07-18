@@ -69,6 +69,15 @@ uint8_t MONSTER_NIBBLE = 0xFF; // 0xFF = auto (checksum rule); 0..15 forces
  * cancel's still-unknown reject bytes get logged. */
 #define HARVEST_MODE 0
 
+/* Cancel-testing hold (PROTOCOL.md §7). SELECT normally auto-advances
+ * (our own simulated selection + ready-to-exchange) within ~200 ms of
+ * the master's first fast poll - too fast for a human to react on the
+ * real toy. With this set, SELECT just keeps acking 0x34 forever
+ * instead. Answered already (no cancel path exists at that stage on a
+ * real toy - HISTORY.md), kept for re-use if that ever needs
+ * re-checking. */
+#define HOLD_AT_SELECT 0
+
 /* ---- Timing (from PROTOCOL.md section 6) ---- */
 const uint16_t SLAVE_SETUP_US   = 35;       // drive our bit this long after CLK falling edge
 const uint32_t EDGE_TIMEOUT_US  = 500000UL; // clock gaps in handshake are only ~21 ms
@@ -78,6 +87,13 @@ const uint32_t EDGE_TIMEOUT_US  = 500000UL; // clock gaps in handshake are only 
  * minimum, but a few rounds mimic the captured trace. */
 const uint8_t POLLS_BEFORE_EVENT = 5;  // 0x34 acks before the 0x27 "user acted" event
 const uint8_t POLLS_BEFORE_READY = 5;  // 0x34 acks after 0x27 before 0x2D "proceed"
+
+/* Consecutive receiveFrame() timeouts (each up to EDGE_TIMEOUT_US) before
+ * declaring the clock truly parked and resetting to WAIT_LINK. The
+ * largest legitimate mid-session gap is the ~21 ms handshake listen gap
+ * - already well inside one EDGE_TIMEOUT_US - so this just needs to
+ * absorb a little jitter, not patience for a long real gap. */
+const uint8_t LINK_LOST_TIMEOUTS = 3;
 
 enum State : uint8_t {
   WAIT_LINK,  // waiting for master beacon 0x32
@@ -95,6 +111,7 @@ State state = WAIT_LINK;
 uint8_t pollCount = 0;
 bool previewEventSent = false;
 uint8_t timeoutsInARow = 0;
+uint8_t lastLoggedByte = 0xFF;  // de-dupes repeat logging of an unhandled byte
 
 uint8_t txBits[52];
 uint8_t rxBits[52];
@@ -435,11 +452,11 @@ void loop() {
 
   if (f < 0) {                       // clock stopped
     timeoutsInARow++;
-    if (state == COMPLETE && timeoutsInARow >= 2) {
+    if (state == COMPLETE && timeoutsInARow >= LINK_LOST_TIMEOUTS) {
       Serial.println(F("=== trade complete, session closed ==="));
       previewEventSent = false;
       toState(WAIT_LINK, F("WAIT_LINK"));
-    } else if (state != WAIT_LINK && timeoutsInARow >= 20) {
+    } else if (state != WAIT_LINK && timeoutsInARow >= LINK_LOST_TIMEOUTS) {
       Serial.println(F("link lost, resetting"));
       previewEventSent = false;
       toState(WAIT_LINK, F("WAIT_LINK"));
@@ -448,12 +465,27 @@ void loop() {
   }
   timeoutsInARow = 0;
 
-  // anything outside the known master vocabulary is protocol news
-  // (e.g. the still-unknown cancel/reject codes) - log it
+  // 0x3B = master cancel/session-abort (PROTOCOL.md §4/§7). Confirmed by
+  // testing: replying to it (even a plain 0x34 ack) makes the master loop
+  // resending it instead of resolving on its own - so, like any other
+  // byte outside the known vocabulary, send NOTHING back and just let it
+  // self-resolve (it already does, via its own retry/timeout). Only the
+  // logging differs: log each distinct byte once, not on every repeat -
+  // the master resends these at poll cadence, and re-printing an
+  // unchanged value adds no information.
   if (f != 0x32 && f != 0x2B && f != 0x39) {
-    Serial.print(F("?? master sent 0x"));
-    Serial.print((uint8_t)f, HEX);
-    Serial.println(evt ? F(" (event frame)") : F(""));
+    if ((uint8_t)f != lastLoggedByte) {
+      if (f == 0x3B) {
+        Serial.println(F("<< master cancel (0x3B)"));
+      } else {
+        Serial.print(F("?? master sent 0x"));
+        Serial.print((uint8_t)f, HEX);
+        Serial.println(evt ? F(" (event frame)") : F(""));
+      }
+      lastLoggedByte = f;
+    }
+  } else {
+    lastLoggedByte = 0xFF;  // back to normal polling - a later repeat is a new event
   }
 
   switch (state) {
@@ -478,6 +510,10 @@ void loop() {
 
     case SELECT:
       if (f == 0x2B) {
+#if HOLD_AT_SELECT
+        sendFrame(0x34);                         // never advance - hold the window open
+        break;
+#endif
         pollCount++;
         if (pollCount == POLLS_BEFORE_EVENT) {
           sendFrame(0x27, true);               // "my user selected a monster"

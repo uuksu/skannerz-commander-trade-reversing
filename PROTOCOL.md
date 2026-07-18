@@ -235,9 +235,33 @@ payload ends.
 | 0x34 | slave | §3.2 | Ack / "I'm here, no news" |
 | 0x2D | slave | §3.2 | "Ready / proceed" — advances the session to the next stage (after 0x39: session confirmed; during fast poll: triggers payload exchange; at end: trade complete, session closes) |
 | 0x27 | slave | §3.3 event | Event notification — sent once, replacing 0x34, right after a slave-side state change (user action / new screen) |
+| 0x3B | master | §3.1 (normal frame) | Cancel / session-abort. Sent repeatedly (poll-like cadence) after either side backs out post-link. Not present in the original capture — found by hardware testing. |
 
-Reject/cancel codes are unknown (§7) — this capture is an accepted trade
-on both sides.
+**0x3B triggers and scope**, confirmed by hardware testing: cancelling
+right after link, before navigating any menu (still LINKED, before the
+toys show "Ok!" — the double-0x39 CONFIRM handshake itself is ~0.5 s and
+automatic, with no visible cancel window), and pressing "Do not accept"
+on an incoming monster during PREVIEW. Two stages have **no cancel path
+at all** on this toy's UI: once the local user has selected a monster
+(SELECT, before the master's own 0x2B fast-poll would trigger the
+exchange) or pressed Accept (ACCEPT), the screen just shows "OK!"
+waiting for the peer with no visible way to back out — confirmed by
+holding the emulator open indefinitely at each stage (`HOLD_AT_SELECT` /
+`HARVEST_MODE` in the sketch) so there was no race against the
+emulator's own timing.
+
+**The slave must not reply to 0x3B.** Tested by making the sketch reply
+`0x34` (the slave's generic "acknowledged, nothing new" byte) and
+resetting to `WAIT_LINK` on receipt: the master got stuck resending 0x3B
+indefinitely and the toy's own cancel never completed. The slave sends
+nothing back for 0x3B (or anything else outside {0x32, 0x2B, 0x39}) —
+the master already resolves it on its own (ERROR screen → "point the
+devices at each other" reconnect prompt → timeout, worst case a few
+seconds) with no reply needed. `slave_emulator.ino` matches this:
+`lastLoggedByte` de-dupes the log line per distinct byte instead of
+printing on every retry, and `LINK_LOST_TIMEOUTS` (3 consecutive
+`receiveFrame()` timeouts, ~1.5 s) resets the sketch's own state back to
+`WAIT_LINK` once the master parks its clock.
 
 ## 5. Session flow (annotated capture timeline)
 
@@ -285,10 +309,19 @@ switch is inferred from timing against the known user flow.
 
 ## 7. Open questions
 
-- **Reject / cancel byte codes.** Never observed — the capture is an
-  accepted trade. The emulator logs any master byte outside
-  {0x32, 0x2B, 0x39}; cancelling a trade on the toy mid-session should
-  reveal them.
+- **Slave-side reject code.** The master's cancel/session-abort byte
+  (0x3B, §4) is only known from the master's side. The emulator always
+  plays slave and never itself declines, so the analogous
+  slave-initiated reject byte (if different from 0x3B) has never been
+  observed. Observing it needs the real toy in slave role, which needs a
+  working Arduino *master* emulator (clock generation + the full
+  beacon/poll/confirm/trade flow — IMPLEMENTATION.md sketches the
+  algorithm but no code exists yet) or a second real toy; deliberately
+  deferred for now. Minor related loose end: a since-fixed sketch bug
+  (replying to 0x3B — see §4) once caused a PREVIEW decline to log
+  `0x3E` instead of `0x3B` — almost certainly an artifact of that bug,
+  not a second genuine code, but unconfirmed since it was only observed
+  under the broken code path.
 - **Master frame trailer.** The purpose of the 1-cycle low tail (§3.1) is
   unknown.
 - **Wire number ↔ displayed number mapping.** Byte 0x0A displays as "11"

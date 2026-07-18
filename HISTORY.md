@@ -178,6 +178,144 @@ I see on the device," don't stop at the first formula that fits the data
 — even a clean 14/14 fit may be only the part of the mechanism that got
 exercised so far.
 
+### 2026-07-18 — cancel/reject byte 0x3B found; checksum-error response still murky
+
+First open question tackled by deliberate hardware testing rather than
+capture analysis: what does the master send when a trade is cancelled or
+rejected? A 6-case test plan was run against a real toy (Arduino always
+playing slave), using nothing but the sketch's existing catch-all logger
+(any master byte outside {0x32, 0x2B, 0x39} was already printed) — no
+logic-analyzer capture needed. One addition was required: SELECT normally
+auto-advances through its own simulated "monster picked / ready" sequence
+within ~200 ms, too fast to react to on the real toy, so a `HOLD_AT_SELECT`
+flag was added to freeze it (mirroring the existing `HARVEST_MODE` hold at
+ACCEPT).
+
+**Result: 0x3B is the master's session-abort byte.** Sent as a normal
+(non-event) §3.1 frame, repeated like a poll. Two independent triggers
+produced identical, clean, repeated `0x3B` in the serial log:
+cancelling right after link (before reaching "Ok!") and pressing
+"Do not accept" on an incoming monster during PREVIEW. In both cases the
+toy shows ERROR, cycles its reconnect prompt, and times out on its own —
+it never waited for a slave reply.
+
+**Two stages turned out to be uncancellable** on this toy's UI: once the
+local user has selected a monster (SELECT) or pressed Accept (ACCEPT),
+the screen just shows "OK!" waiting for the peer, with no back-out option
+— confirmed by holding the emulator open indefinitely at each stage so
+there was no race against its own timing. The double-0x39 CONFIRM
+handshake right after link is similarly uncancellable, but for a
+different reason: per the original capture it's a ~0.5 s automatic
+exchange with no visible user-input window at all.
+
+**Checksum failure produces something else entirely.** Forcing
+`MONSTER_NIBBLE` to a value that fails the low-3-bit check (still a
+legitimate way to trigger a receiver-side ERROR, purely from the Arduino
+side) did *not* yield a repeated 0x3B. Instead: an initial
+`0x36(event) 0x01(event) 0xBF`, then a stable 4-frame loop
+`0xE1(event) 0x18 0x30(event) 0x55` forever. Leading theory: this isn't
+four new byte codes but `receiveFrame()`'s fixed 12-cycle assumption
+losing lock against an error-recovery sequence that either uses a
+different frame shape or is retransmitted back-to-back with no idle gap
+between frames — a misaligned reader would produce exactly this kind of
+rotating, stable-but-wrong readout. Unconfirmed; the proposed next step
+is a raw bit dump (log every CLK-edge DATA sample with no start/stop
+framing assumed) rather than reaching for a logic analyzer, since the
+Arduino can already sample at the wire's own bit rate.
+
+### 2026-07-18 (same day) — the checksum-error "noise" is one exact 112-bit waveform
+
+Follow-up: a `rawDump()` function was added to the sketch (logs every CLK
+edge's DATA level with no start/stop framing assumed, F=falling/master
+phase, R=rising/slave phase) and wired to auto-trigger on any master byte
+still outside the known vocabulary (now including 0x3B), bounded to 600
+edges per burst so it doesn't need hand-timed triggering. Re-ran the
+checksum-failure trigger from the previous entry with this enabled.
+
+At every edge F and R carried the same bit (expected: the master holds
+DATA constant for a full clock cycle, and nothing else drives the line in
+this state), so each F/R pair reduces to one bit per clock cycle — the two
+raw captures reduce to 300 and 292 bits respectively. Autocorrelating the
+first capture against itself found a **112-bit lag with a 100% bit match
+(188/188 compared positions)** — not a fuzzy fit, exact. The second,
+independently-triggered capture was confirmed (by substring search) to be
+a **rotation of the exact same 112-bit cycle**, just caught at a different
+phase. So there is exactly one signal here, not four bytes: a **112-bit
+waveform (79.5 ms at 1408 Hz) repeated back-to-back with zero idle gap**,
+composed of a ~20-bit low run (14.2 ms), a ~61-bit high run (43.3 ms), and
+a fixed 31-bit mixed run (22.0 ms), then repeat. Because 112 isn't a
+multiple of 12, `receiveFrame()`'s fixed-length reads drift to a different
+phase on every pass, which is exactly why the byte-oriented log showed a
+rotating sequence of different-looking bytes for what is actually one
+unchanging signal.
+
+This fully confirms the "framing artifact, not new codes" theory from the
+same-day entry above, and replaces "unconfirmed" with a decoded waveform
+shape. Not yet known: the true byte alignment within the 31-bit mixed
+run — nothing in this waveform marks a start bit the way a normal §3.1
+frame does, so where a "byte" begins in that stretch is unestablished,
+not just unread. The shape itself (long solid high/low holds rather than
+crisp start/stop framing) looks structurally closer to the handshake
+beacon behavior than to a normal frame, suggesting a receiver-side
+validation failure drops the master into a different, lower-level
+recovery path than the clean single-byte 0x3B used for a user-initiated
+cancel.
+
+Methodology note: this was reached with the same two constraints as the
+rest of this project's testing - Arduino only, no logic analyzer - by
+having the sketch itself become the raw sampler once its higher-level
+frame assumptions stopped applying, rather than reaching for external
+capture hardware the moment the existing decoder failed.
+
+### 2026-07-18 (same day) — checksum-error path dropped; acking 0x3B makes it worse
+
+User call: the checksum-error path "should not normally happen" and
+isn't worth more investigation - dropped from PROTOCOL.md §7, and
+`rawDump()` / `RAW_DUMP_ON_UNKNOWN_BYTE` were removed from the sketch as
+now-unneeded test scaffolding (the sketch's stray `MONSTER_NUM`/`HP`/
+`NIBBLE` test values from that investigation were reset to the committed
+defaults at the same time).
+
+Of the two remaining sub-questions under "reject/cancel byte codes":
+**slave-side reject code** was explicitly deferred (it needs a working
+Arduino *master* emulator so the real toy can be forced into slave role
+— a real build, not a config flag; user chose not to start it now).
+
+**Whether the slave should ack 0x3B was tested, and answered — no.** The
+sketch was changed to reply `0x34` (the slave's only "acknowledged,
+nothing new" byte) and reset to `WAIT_LINK` on receipt. Result: the real
+master got stuck resending 0x3B indefinitely and its own cancel flow
+never completed ("not cancelling" on the toy) — replying at all appears
+to divert the master away from its normal self-timeout path, rather than
+helping it along. Reverted: the slave now sends nothing back for 0x3B
+(or anything else outside {0x32, 0x2B, 0x39}), matching the original
+TC2/TC4 behavior that already worked correctly. Also fixed while in
+there: unhandled bytes were being logged on every repeat (the master
+resends them at poll cadence), flooding the console for no new
+information - logging is now de-duplicated per distinct byte value
+(`lastLoggedByte`), reset once normal polling resumes so a later,
+separate occurrence still logs.
+
+One loose end: while the broken ack was active, declining during PREVIEW
+logged `0x3E` instead of the expected `0x3B`. Most likely explanation:
+the bad ack put the master into a confused retry state and `0x3E` was a
+symptom of *that*, not a second genuine reject code — but this is
+unconfirmed, since it was observed only under the broken code path. A
+clean re-test (current sketch, silent on 0x3B) would settle whether
+`0x3E` ever recurs under normal conditions.
+
+**Follow-up fix, same round of testing:** with the ack bug gone, cancel
+recovery worked but was sluggish - the sketch's own "link lost,
+resetting" reset took up to 20 consecutive `receiveFrame()` timeouts at
+500 ms each (~10 s worst case) after the master parked its clock. That
+threshold was never tied to a real protocol constraint - the largest
+legitimate mid-session gap is the ~21 ms handshake listen gap, already
+far inside a single 500 ms timeout - it was just an arbitrarily patient
+number. Replaced with a named `LINK_LOST_TIMEOUTS = 3` (~1.5 s worst
+case) shared by both the COMPLETE and general link-lost paths, which
+previously used inconsistent thresholds (2 vs. 20) for what's
+functionally the same "clock's been parked, give up" check.
+
 ## Superseded theories at a glance
 
 | Theory | Fate |
@@ -191,6 +329,7 @@ exercised so far.
 | Level caps at 2 | Dead — only the checksum-checked bits had been tested; levels 1–4 on the wire |
 | Level = EXP/30 + 1 (per the manual) | Dead — level = (nibble >> 2) + 1 |
 | The 12 "zeros" bits are padding | Dead — 3-digit BCD, tens-and-up of the experience counter |
+| Slave should ack the master's 0x3B cancel | Dead — acking makes the master retry-loop instead of self-resolving; correct behavior is silence |
 
 ## Recurring traps
 
