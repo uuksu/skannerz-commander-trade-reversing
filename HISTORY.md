@@ -316,6 +316,32 @@ case) shared by both the COMPLETE and general link-lost paths, which
 previously used inconsistent thresholds (2 vs. 20) for what's
 functionally the same "clock's been parked, give up" check.
 
+### 2026-07-18 (same day) — wire number ↔ displayed number mapping resolved: byte + 1, zero-indexed
+
+Settled by direct testing: sending wire byte N always produces a displayed
+number of N + 1 — the wire is 0-indexed, the toy's UI is 1-indexed. No
+dependence on checksum, Level, or EXP.
+
+This also retroactively resolves a related loose end. Cross-referencing
+the archived raw test log (`findings.txt`, no longer in the tree but
+still in git history at the first commit) turned up a harvest-mode dump
+the user had labeled "18" on-screen before triggering it — its logged
+payload (`numByte=17, nibble=2, HP=BCD 1, EXP=6`) is bit-for-bit
+identical to the original capture's "Diamond Back" (`b=0x11, hp=0x01,
+exp=0x06, n=2`, PROTOCOL.md's payload table). That independently
+confirms Diamond Back displays as 18 (`0x11 + 1`), which kills the old
+candidate formula's prediction of 28 and its assumption that no monster
+shows "18".
+
+The one holdout data point that had motivated suspecting the mapping
+wasn't simply +1 — `b=0x04` displaying "15" instead of "5" — was never
+reproduced. It came from the very first hardware session (2026-07-16,
+before the checksum was cracked, before HARVEST_MODE existed, no record
+of whether the toy already owned that species), so it's most likely a
+stale/duplicate-acquisition artifact of that early, less-controlled
+test rather than a second real mechanism. Not investigated further per
+user call ("we can safely ignore this").
+
 ## Superseded theories at a glance
 
 | Theory | Fate |
@@ -330,6 +356,7 @@ functionally the same "clock's been parked, give up" check.
 | Level = EXP/30 + 1 (per the manual) | Dead — level = (nibble >> 2) + 1 |
 | The 12 "zeros" bits are padding | Dead — 3-digit BCD, tens-and-up of the experience counter |
 | Slave should ack the master's 0x3B cancel | Dead — acking makes the master retry-loop instead of self-resolving; correct behavior is silence |
+| Display number depends on the checksum nibble (`(check-1)*10+byte+1`) | Dead — direct testing confirms plain `byte + 1`, wire 0-indexed; the formula was overfit to 3 points, one a likely stale/duplicate artifact |
 
 ## Recurring traps
 

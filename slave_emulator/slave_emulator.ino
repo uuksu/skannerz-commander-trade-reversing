@@ -35,8 +35,7 @@ const uint8_t PIN_DATA = 3;
  * doubles as the displayed Level = (nibble>>2)+1; the persistent
  * experience counter spans the zeros and EXP fields,
  * displayedEXP = 10*decodeBcd3(zeros) + EXP/8.
- * The displayed monster number is NOT simply wire byte + 1; the mapping
- * is unresolved (PROTOCOL.md §7) - use HARVEST_MODE to gather pairs. */
+ * The displayed monster number is wire byte + 1 (wire is 0-indexed). */
 const uint8_t MONSTER_NUM    = 138;   // wire byte = NUM-1
 const uint8_t MONSTER_HP     = 63;   // 1..99, BCD-encoded by the sketch
 

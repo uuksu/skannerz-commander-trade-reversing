@@ -155,9 +155,10 @@ verifiers in `analysis/nibble_rule.py`):
 - **NUM** — the monster's identity, one byte. Spot-verified accepted (with
   a correct checksum) at 15 distinct values spanning 0x01–0x89, including
   0x89 (137) inside the presumed secret-monster range; the roster is
-  126 regular + 12 secret monsters. The number the toy *displays* is not
-  simply byte + 1 (byte 0x0A shows as monster "11" but byte 0x04 shows as
-  "15") — the mapping is unresolved (§7).
+  126 regular + 12 secret monsters. The number the toy *displays* is
+  `byte + 1` — the wire is 0-indexed, the toy's UI is 1-indexed.
+  Confirmed by direct round-trip testing (send N, toy displays N + 1);
+  independent of checksum, Level, and EXP.
 
 - **check** — a 4-bit checksum over the number byte, both BCD-encoded
   fields, and EXP:
@@ -324,13 +325,6 @@ switch is inferred from timing against the known user flow.
   under the broken code path.
 - **Master frame trailer.** The purpose of the 1-cycle low tail (§3.1) is
   unknown.
-- **Wire number ↔ displayed number mapping.** Byte 0x0A displays as "11"
-  (= byte + 1) but byte 0x04 displays as "15". Candidate formula:
-  `display = (check − 1) × 10 + byte + 1` — fits the three known points
-  (0x01→2, 0x04→15, 0x0A→11) but predicts byte 0x11 (Diamond Back)
-  displays "28" and that no monster displays "18"; unverified.
-  Harvest-mode dumps of a full real collection (name + displayed number +
-  wire payload) would settle it empirically.
 - **NUM byte valid range.** Accepted at every value tested (15 spot checks
   across 0x01–0x89), but the range has never been swept exhaustively.
 - **HP limits.** BCD 99 is accepted; whether the toy enforces any cap
