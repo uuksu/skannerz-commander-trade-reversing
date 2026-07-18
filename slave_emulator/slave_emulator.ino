@@ -28,102 +28,36 @@
 const uint8_t PIN_CLK  = 2;
 const uint8_t PIN_DATA = 3;
 
-/* ---- Monster to send (the whole point of the exercise) ----
- * The 4-bit "nibble" field is a CHECKSUM, fully cracked 2026-07-16
- * against a real toy (analysis/nibble_rule.py), over the number byte,
- * the (BCD-encoded) HP byte, and EXP:
- *   digitSum(x) = hi_nibble(x) + lo_nibble(x)
- *   expTerm     = (EXP % 8) - (EXP / 8)
- *   nibble = (-digitSum(byte) - 2*digitSum(hpBcd) + expTerm) mod 8
- * Only the low 3 bits are CHECKED (for acceptance) - a real toy accepted
- * both n and n+8 for the same monster (confirmed at n=0/8 and n=1/9), so
- * the top bit is a don't-care for the checksum and checksumFor() below
- * only ever needs to produce 0..7 to be accepted.
- * Cracked in three passes, each a controlled accept/reject sweep against
- * a real toy: the byte term (9 pairs at HP=63, EXP=9), the HP term (one
- * fixed byte, HP=1/2/3/4/10), the EXP term (one fixed byte+HP, EXP swept
- * 1..9/16 on two different byte+HP baselines to confirm separability).
- * expTerm(9) == 0, which is exactly why every earlier byte/HP experiment
- * "just worked" while EXP sat at this sketch's default of 9 - EXP's
- * contribution was silently cancelling out the whole time.
- * Wrong low-3-bits -> ERROR. The nibble carries no *fixed* monster
- * identity - byte 0x89 (num 138) confirmed valid, so the full roster
- * (126 + 12 secret) is probably addressable. But the FULL 4-bit nibble
- * (not just the checked low 3 bits) carries real meaning: it's also the
- * "Level" the toy displays after a trade - level = (nibble>>2)+1, over
- * all 16 values, giving levels 1..4. Confirmed 2026-07-17 in two rounds:
- * all 8 checksum-valid residues (top bit 0) gave levels 1-2 (8/8); since
- * the top bit doesn't affect acceptance, forcing it set on the same
- * monsters (nibble -> nibble+8, still accepted) gave levels 3-4 (4/4).
- * NUM/HP/EXP fix bit 2 of the nibble via the checksum (not freely
- * choosable), but the top bit is free - so for one monster you can pick
- * between exactly two levels (L and L+2) via MONSTER_NIBBLE = auto value
- * or auto value + 8; reaching the other pair needs different NUM/HP/EXP.
- * NOTE: the toy's displayed monster number is NOT always byte + 1
- * (byte 0x0A displays as "11", but byte 0x04 as "15"); mapping under
- * investigation — use HARVEST_MODE.
- * HP goes on the wire as BCD (0x63 = 63); non-BCD bytes -> ERROR. No
- * confirmed ceiling below 99: BCD 0x99 is accepted with the correct
- * HP-aware checksum (2026-07-16) - the earlier "BCD 99 -> ERROR" finding
- * predates knowing HP feeds the checksum, so that was a checksum
- * mismatch, not a range check (same trap the NUM field's early "range
- * errors" turned out to be). The toy's UI visibly breaks at HP 99 (the
- * in-game balance cap is ~63) but the wire accepts it. 99 is also as
- * high as MONSTER_HP can go through toBcd() without producing an
- * invalid (non-BCD) byte, so it's untested whether the toy enforces any
- * ceiling beyond BCD validity itself.
- * The REAL persistent experience counter SPANS TWO FIELDS, confirmed
- * 2026-07-18/19: `displayedEXP = 10*decodeBcd3(zeros) + (EXP / 8)`.
- * The 12 "zeros" bits (wire bits 32-43) are 3-digit BCD holding the
- * tens-and-up part (zeros=BCD"030" showed EXP 300; zeros=BCD"003"
- * showed EXP 30 - the original single-field theory, since refined).
- * The 7-bit EXP field's own `EXP / 8` (0..15, confirmed 14/14 by the
- * ORIGINAL EXP-alone sweep before zeros was discovered) is the ONES
- * digit, additive with the zeros term - confirmed by zeros=BCD"003"
- * with EXP=2 (EXP/8=0) still showing exactly 30, and the formula
- * fitting all 4 known data points (including the original zeros=0,
- * EXP=64->8 point) with zero free parameters. Since EXP/8 ranges 0..15,
- * not just 0..9, any exact integer 0..9999 is reachable with NO
- * rounding: split target = 10*Z + R (R = target%10, Z = target/10),
- * BCD-encode Z into zeros, and pick EXP = (R<<3)|low3 for any low3
- * 0..7 - EXP's low 3 bits are still fully free for the checksum
- * (varying them doesn't change EXP/8). Zeros also feeds the checksum
- * (see checksumFor() below): nibble_low3 -= digitSum3(zeros), confirmed
- * 3/3 by predicting the accepted nibble ahead of testing. Sending zeros
- * as plain binary instead of BCD (e.g. 30 as 0b000000011110, nibbles
- * 0/1/14 - 14 isn't a valid decimal digit) doesn't error, it produces
- * garbage (observed: displayed EXP 1140) - so this field isn't
- * BCD-validated the strict way HP is. Level is NOT EXP/30+1 as the
- * nibble note above. */
+/* ---- Monster to send ----
+ * Field semantics, checksum rule and receiver validation: PROTOCOL.md
+ * §3.5. In short: the 4-bit nibble is a checksum (checksumFor() below)
+ * of which the toy checks only the low 3 bits, and the full 4-bit field
+ * doubles as the displayed Level = (nibble>>2)+1; the persistent
+ * experience counter spans the zeros and EXP fields,
+ * displayedEXP = 10*decodeBcd3(zeros) + EXP/8.
+ * The displayed monster number is NOT simply wire byte + 1; the mapping
+ * is unresolved (PROTOCOL.md §7) - use HARVEST_MODE to gather pairs. */
 const uint8_t MONSTER_NUM    = 138;   // wire byte = NUM-1
-const uint8_t MONSTER_HP     = 63;   // 1..99 (BCD-encoded by the sketch; ceiling above 99 untested)
+const uint8_t MONSTER_HP     = 63;   // 1..99, BCD-encoded by the sketch
 
-/* Primary interface: say what you want the monster's real stats to be,
- * not the raw wire fields. 1 = derive MONSTER_ZEROS/MONSTER_EXP/
- * MONSTER_NIBBLE below from TARGET_LEVEL/TARGET_EXP via solveLevelExp()
- * (see its comment for how); 0 = fall back to setting
- * MONSTER_ZEROS/MONSTER_EXP/MONSTER_NIBBLE directly, for lower-level
- * experiments (e.g. deliberately sending the level-4 glitch value, or
- * plain-binary zeros to reproduce the pre-BCD-fix garbage display). */
+/* Primary interface: state the stats the toy should show instead of raw
+ * wire fields. 1 = derive MONSTER_ZEROS/MONSTER_EXP/MONSTER_NIBBLE below
+ * from TARGET_LEVEL/TARGET_EXP via solveLevelExp(); 0 = set the raw
+ * fields directly, for lower-level experiments (e.g. the level-4 glitch
+ * value, or non-BCD zeros). */
 #define USE_LEVEL_EXP_INTERFACE 1
 
 #if USE_LEVEL_EXP_INTERFACE
-const uint8_t  TARGET_LEVEL = 3;   // 1..3 - the level the toy should show.
-                                    // 4 is a real wire value but not a real
-                                    // game one (see header comment); refused.
-const uint16_t TARGET_EXP   = 95;  // 0..9999 - the REAL experience counter,
-                                    // ANY exact integer (see header comment -
-                                    // it spans the zeros field's tens-and-up
-                                    // BCD digits plus the EXP field's ones
-                                    // digit, no rounding needed).
+const uint8_t  TARGET_LEVEL = 3;   // 1..3 (4 is wire-acceptable but not a
+                                    // real game value; refused)
+const uint16_t TARGET_EXP   = 95;  // 0..9999, the exact experience counter
 #endif
 
-uint16_t MONSTER_ZEROS = 0;    // 0..4095 (3-digit BCD = tens-and-up of real
-                               // EXP); overwritten by solveLevelExp() in
-                               // setup() if USE_LEVEL_EXP_INTERFACE is 1
-uint8_t MONSTER_EXP    = 0;    // raw 0..127; top 4 bits (EXP>>3) are the real
-                               // EXP's ones digit, low 3 bits are a free
-                               // checksum knob (see header comment).
+uint16_t MONSTER_ZEROS = 0;    // 12-bit, 3-digit BCD = realEXP/10; overwritten
+                               // by solveLevelExp() in setup() if
+                               // USE_LEVEL_EXP_INTERFACE is 1
+uint8_t MONSTER_EXP    = 0;    // raw 0..127; top 4 bits = realEXP's ones
+                               // digit, low 3 bits = free checksum knob.
                                // Overwritten the same way as MONSTER_ZEROS
 uint8_t MONSTER_NIBBLE = 0xFF; // 0xFF = auto (checksum rule); 0..15 forces
                                // a value; overwritten the same way too
@@ -131,9 +65,8 @@ uint8_t MONSTER_NIBBLE = 0xFF; // 0xFF = auto (checksum rule); 0..15 forces
 /* Harvest mode: complete the payload exchange (so the toy's monster data
  * gets logged over serial), then keep acking without ever accepting, so
  * the trade cannot commit. CANCEL THE TRADE ON THE TOY after each round —
- * it keeps its monster, its trade state resets cleanly (a silent abort
- * makes it re-send the same monster next round), and whatever byte the
- * cancel puts on the wire gets logged (reject codes are still unknown). */
+ * a silent abort makes it re-send the same monster next round, and the
+ * cancel's still-unknown reject bytes get logged. */
 #define HARVEST_MODE 0
 
 /* ---- Timing (from PROTOCOL.md section 6) ---- */
@@ -286,13 +219,11 @@ static inline uint8_t digitSum3(uint16_t v12) {
   return ((v12 >> 8) & 0xF) + ((v12 >> 4) & 0xF) + (v12 & 0xF);
 }
 
-/* Checksum rule for the payload nibble (see header comment): a BCD
- * digit-sum checksum over the number byte, the (BCD-encoded) HP byte,
- * and the (BCD-encoded) zeros/real-EXP field, plus a base-8
- * digit-difference term over the small 7-bit EXP field. Only the low 3
- * bits are checked (the toy accepts either n or n+8 - confirmed by
- * testing both). Bit 2 of the returned value doubles as the displayed
- * "Level" (>>2)+1. */
+/* Payload checksum nibble (PROTOCOL.md §3.5): digit sums of the number
+ * byte, the BCD HP byte and the BCD zeros field, plus a base-8
+ * digit-difference term over the 7-bit EXP field. The toy checks only
+ * the low 3 bits (accepts both n and n+8); the full 4-bit wire field
+ * doubles as the displayed Level = (nibble>>2)+1. */
 static uint8_t checksumFor(uint8_t numByte, uint8_t hpBcd, uint16_t zerosBcd, uint8_t exp) {
   int8_t numSum    = (numByte >> 4) + (numByte & 0x0F);
   int8_t hpSum     = (hpBcd >> 4) + (hpBcd & 0x0F);
@@ -306,21 +237,17 @@ static uint8_t nibbleFor(uint8_t numByte, uint8_t hpBcd, uint16_t zerosBcd, uint
 }
 
 /* Given NUM/HP and a desired (Level, EXP) pair, work out the raw wire
- * zeros/EXP/nibble that produce them (2026-07-17 through 07-19
- * findings). The REAL persistent experience counter SPANS TWO FIELDS -
- * see the header comment: displayedEXP = 10*decodeBcd3(zeros) + EXP/8.
- * No rounding is needed for any exact integer 0..9999: split
- * targetExp = 10*Z + R (Z = targetExp/10 goes into zeros as 3-digit
- * BCD, R = targetExp%10 goes into EXP's top 4 bits, EXP>>3). EXP's low
- * 3 bits are still fully free - they don't affect EXP/8, only the
- * checksum - and cycle through all 8 checksum residues regardless of R
- * (expTerm(exp) = low3 - R is 8 consecutive integers as low3 sweeps
- * 0..7, always a complete residue system mod 8), so any Level is
- * reachable without perturbing the displayed experience at all.
- * Level = (nibble>>2)+1: the nibble's low 3 bits are pinned by
- * checksumFor(), only the top bit is free (0 for level 1/2, 1 doubles
- * as level 3's "+8 twin" of level 1). Level 4 is a real wire value (see
- * header comment) but not a real game one, so it's refused here. */
+ * zeros/EXP/nibble that produce them. The experience counter spans two
+ * fields (PROTOCOL.md §3.5): displayedEXP = 10*decodeBcd3(zeros) + EXP/8,
+ * so split targetExp = 10*Z + R: Z -> zeros as 3-digit BCD, R -> EXP's
+ * top 4 bits. EXP's low 3 bits don't affect EXP/8, only the checksum,
+ * and sweeping them walks the checksum through all 8 residues
+ * (expTerm = low3 - R is 8 consecutive integers, always a complete
+ * residue system mod 8), so any Level is reachable without perturbing
+ * the displayed experience. Level = (nibble>>2)+1: the low 3 bits are
+ * pinned by checksumFor(), only the top bit is free (level 3 is level
+ * 1's "+8 twin"). Level 4 is wire-acceptable but not a real game value,
+ * so it's refused here. */
 static void solveLevelExp(uint8_t numByte, uint8_t hpBcd, uint8_t level, uint16_t targetExp,
                            uint16_t &outZeros, uint8_t &outExp, uint8_t &outNibble) {
   if (level < 1 || level > 3) {

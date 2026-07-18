@@ -6,18 +6,19 @@ complete monster trade between two Radica **Skannerz Commander** (model
 its 126 regular monsters are divided into three categories (Tech/Power/Magic
 class symbols), plus 12 secret monsters.
 
-Traded monsters:
+Traded monsters in the capture:
 
 | Device | Role in capture | Monster | HP |
 |--------|-----------------|---------|----|
 | 1 | **master** (drives clock) | Night Lurk — wire number byte 0x01 | 3 |
 | 2 | **slave** | Diamond Back — wire number byte 0x11 | 1 |
 
-Confidence notes: everything below is read directly from the capture unless
-marked *(hypothesis)*. Payload field semantics (§3.5) were additionally
-validated by hardware testing with an Arduino slave emulator against a real
-toy (2026-07-16). See `IMPLEMENTATION.md` for an MCU bit-bang guide and
-`analysis/` for the scripts used.
+Everything below is read directly from the capture; the payload field
+semantics (§3.5) are additionally validated by hardware testing with an
+Arduino slave emulator against a real toy. The **reference implementation**
+is `slave_emulator/slave_emulator.ino`. See `IMPLEMENTATION.md` for the MCU
+bit-bang guide, `analysis/` for the decoding scripts, and `HISTORY.md` for
+how these findings were reached (including superseded theories).
 
 ## 1. Physical layer
 
@@ -82,8 +83,8 @@ cycle:   0     1..8      9    10    11
 
 After the stop bit the master always pulls the line low for exactly one
 cycle, then releases. This trailer appears even with no partner present
-(handshake beacons), so it is part of the master frame format
-*(purpose unknown — possibly an end-of-frame / turn-handoff marker)*.
+(handshake beacons), so it is part of the master frame format; its purpose
+is unknown (§7).
 
 ### 3.2 Slave ack frame (10 cycles)
 
@@ -140,158 +141,85 @@ bit    0     1-3    4-11    12-15   16-23    24-31    32-43     44-50   51
        (0)  '111'  (8 bit) (4 bit) (8 bit)  (8 bit)  (12 bit)  (7 bit) (1)
 ```
 
-Observed payloads:
+Payloads in the capture:
 
 | | wire bits (52) | NUM | chk | HP | HP | zeros | EXP | stop |
 |---|---|---|---|---|---|---|---|---|
 | master (Night Lurk, HP 3) | `0111 00000001 0001 00000011 00000011 000000000000 0000000 1` | 0x01 | 1 | 3 | 3 | 0 | 0 | 1 |
 | slave (Diamond Back, HP 1) | `0111 00010001 0010 00000001 00000001 000000000000 0000110 1` | 0x11 | 2 | 1 | 1 | 0 | 6 | 1 |
 
-Field semantics (capture + 2026-07-16 emulator-vs-real-toy testing):
+Field semantics (reference implementation: `buildTxPayload()`,
+`checksumFor()` and `solveLevelExp()` in the sketch; datasets and
+verifiers in `analysis/nibble_rule.py`):
 
-- **NUM**: the monster's identity, one byte. Bytes 0x01–0x89 (1–137)
-  verified accepted (with correct checksum), including byte 0x89 (num
-  138), inside the presumed 12-secret-monster range; the roster is 126 regular + 12 secret
-  monsters, so bytes up to ~137 are plausibly valid — the early failures
-  at 0x2A/0x39 were checksum mismatches, not range errors (0x2A was later
-  accepted with the right checksum).
-  The number the toy *displays* is not simply byte + 1: byte 0x0A shows
-  as monster "11" (= byte + 1) but byte 0x04 shows as "15". Candidate
-  formula: display = (check − 1) × 10 + byte + 1, which fits 0x01→2,
-  0x04→15, 0x0A→11, but predicts Diamond Back (0x11, check 2) displays
-  as "28" (its earlier "#18" attribution may have been derived, not
-  observed) and that no monster can display "18" — check on a real unit;
-  harvest-mode dumps of known monsters will settle it.
-- **check** *(fully cracked by `analysis/nibble_rule.py`)*: a checksum
-  over the number byte, the BCD-encoded HP byte, the BCD-encoded zeros
-  field, AND the small EXP field, stored in the 4-bit field:
+- **NUM** — the monster's identity, one byte. Spot-verified accepted (with
+  a correct checksum) at 15 distinct values spanning 0x01–0x89, including
+  0x89 (137) inside the presumed secret-monster range; the roster is
+  126 regular + 12 secret monsters. The number the toy *displays* is not
+  simply byte + 1 (byte 0x0A shows as monster "11" but byte 0x04 shows as
+  "15") — the mapping is unresolved (§7).
+
+- **check** — a 4-bit checksum over the number byte, both BCD-encoded
+  fields, and EXP:
 
   ```
   digitSum(x)  = hi_nibble(x) + lo_nibble(x)
-  digitSum3(x) = 3 hex-nibble digit sum of a 12-bit value (see zeros below)
+  digitSum3(x) = sum of the 3 hex nibbles of a 12-bit value
   expTerm      = (EXP mod 8) − (EXP div 8)
-  check = (−digitSum(NUM) − 2·digitSum(bcd(HP)) − digitSum3(zeros) + expTerm) mod 8
+  check = (−digitSum(NUM) − 2·digitSum(HPbcd) − digitSum3(zeros) + expTerm) mod 8
   ```
 
-  The `zeros` term was cracked a day after the rest, 2026-07-18, when
-  sending a nonzero zeros value with the old (zeros-less) formula
-  produced an immediate ERROR — see the zeros entry below for the full
-  story; the `−digitSum3(zeros)` term was predicted from a single data
-  point and confirmed 3/3 against a real toy ahead of testing. The
-  original 2026-07-16 cracking below predates that and was done entirely
-  at zeros=0, where the term is a no-op — same "silently cancels out"
-  trap as `expTerm(9)==0` below.
+  The receiver validates **only the low 3 bits** — a mismatch there gives
+  an ERROR screen and a link abort, while the top bit is a don't-care for
+  acceptance: both `check` and `check + 8` are accepted for the same
+  monster.
 
-  Cracked in three passes against a real toy, all on 2026-07-16. Pass 1,
-  the NUM term (10 accepted payloads at HP=63/EXP=9 — nums 42, 43, 44,
-  12, 135, 136, 15, 49, 123 — plus 3 rejections). Pass 2, the HP term,
-  via a controlled sweep on one fixed number (138) across HP=1, 2, 3, 4,
-  10 (6/6 exact — HP=10 decided between the only two linear-in-HP-digit
-  models the earlier points left standing). Pass 3, the EXP term, via a
-  sweep on the same fixed number+HP across EXP=1..9 and 16: the naive
-  "+EXP" pattern holds for EXP=1..7 but appears to break at EXP=8 —
-  until retesting found some values have a confirmed **twin 8 apart**
-  (EXP=3 accepts both nibble 8 and 0; EXP=4 accepts both 9 and 1),
-  revealing that **only the low 3 bits of the field are checked** — the
-  top bit is a don't-care. A second EXP sweep on a different number
-  (135) confirmed EXP's contribution is separable (same shift
-  regardless of which number/HP is being sent).
-  `expTerm(9) == 0`, which is exactly why every number and HP experiment
-  in this project "just worked" while EXP sat at the emulator's default
-  of 9 — its contribution was silently cancelling out the entire time.
-  This formula fits every sample ever gathered in this project,
-  including the two original trade.csv captures (Night Lurk, Diamond
-  Back) and four HARVEST_MODE dumps that earlier looked like outliers —
-  they simply weren't at EXP=9.
-  Supersedes an earlier mod-4 "residue 0 wraps to 1" theory (artifact of
-  too small a dataset: 0 is a plain valid check value). The nibble
-  carries no *fixed* monster identity (species/tribe/category theories,
-  which assumed a static per-monster tag, are still dead — the value is
-  derived fresh from NUM+HP+EXP every time). It does carry real meaning,
-  though: it's also the **"Level"** the toy shows after a trade
-  completes — `level = (nibble >> 2) + 1`, over the **full 4-bit wire
-  field**, giving levels 1–4. Proven in two rounds against a real toy,
-  both 2026-07-17: first, all 8 checksum-valid residues (0–7, top bit
-  0) gave levels 1–2 (8/8 exact); a first pass concluded the field
-  topped out at level 2 there, but that only tested the 3 bits the
-  *checksum* validates. The receiver's checksum only checks `nibble mod
-  8` — the top bit is a don't-care for acceptance (see below) — so a
-  second round forced the top bit set on 4 of the same monsters
-  (nibble → nibble+8, still accepted) and got levels 3–4, another 4/4
-  exact. Net effect: NUM+HP+EXP fix bit 2 of the nibble (via the
-  checksum), so bit 2 isn't freely choosable, but bit 3 is — meaning for
-  any single monster you can pick between exactly two levels (`L` and
-  `L+2`) by choosing which of the two checksum-valid nibbles (`c` or
-  `c+8`) to send; reaching the other pair requires a different NUM/HP/EXP
-  (to change checksum bit 2). All four levels are reachable this way.
-  This still refutes the manual's "one level per 30 EXP" as the literal
-  mechanism — level isn't a function of EXP alone, it's baked into the
-  NUM+HP+EXP-derived nibble (plus the freely-chosen top bit). **The real
-  in-game ceiling is level 3** — level 4 is a wire value the checksum
-  happily accepts (it only ever validates 3 bits) but not one real game
-  data would produce; `slave_emulator.ino`'s `solveLevelExp()` refuses to
-  build it. Treat nibble 12–15 as an out-of-spec/glitch region, not a
-  4th real tier.
-- **HP twice, BCD, no confirmed ceiling below 99**: current HP duplicated,
-  **BCD-encoded**. Verified: byte 0x63 (BCD 63) is accepted and displays
-  as HP 63; 0x3E (low nibble > 9 → invalid BCD) → ERROR. **BCD 0x99 (99)
-  is also accepted** (2026-07-16, with the correct HP-aware checksum,
-  §3.5's `check` field) — the earlier "0x99 → ERROR" finding predates
-  the discovery that HP feeds the checksum, so that rejection was almost
-  certainly a checksum mismatch misread as a range/ceiling error, the
-  same trap the NUM field fell into before its checksum was understood.
-  The toy's own UI visibly breaks/glitches displaying HP 99 (the in-game
-  balance cap is meant to be ~63), so it's accepted at the wire level
-  but not a value the real game ever produces. 99 is also the natural
-  ceiling of the sketch's decimal `MONSTER_HP` → `toBcd()` path (values
-  ≥ 100 would emit a non-BCD high nibble, independently hitting the
-  invalid-BCD ERROR) — untested whether the toy enforces any cap beyond
-  BCD validity itself. The captured values (3, 1) are single-digit so
-  BCD == binary there, which is why the capture alone couldn't reveal
-  the encoding. Both samples identical — likely redundancy, possibly
-  (current, max). Send the same value in both.
-- **zeros (12 bit) + EXP (7 bit) — FULLY SOLVED 2026-07-18/19: TOGETHER
-  they form the real, persistent experience counter.** Zero in both
-  original captures and every test before this discovery not because
-  either field is unused, but because 3-digit BCD naturally reads as 0
-  and `0 // 8` is 0. The combined formula, fit with **zero free
-  parameters to all 4 known data points including the original
-  zeros=0/EXP=64→8 case**:
+  The full 4-bit field also encodes the **Level** the toy shows in its
+  monster menu: `level = (nibble >> 2) + 1`, levels 1–4 (all 12 reachable
+  nibble values confirmed against a real toy). Real game data only
+  produces levels 1–3; nibble values 12–15 (level 4) are wire-acceptable
+  but out-of-spec, and the reference sketch refuses to build them.
+
+  Consequence: NUM/HP/zeros/EXP fix bit 2 of the nibble via the checksum,
+  and bit 3 is free — for a given monster you choose between levels `L`
+  and `L+2` by sending `check` or `check + 8`; reaching the other pair
+  requires different field values (in practice, EXP's free low 3 bits —
+  see below).
+
+- **HP × 2 (BCD)** — current HP, duplicated; send the same value in both.
+  BCD-encoded and strictly validated: a non-BCD nibble (e.g. 0x3E) gives
+  an ERROR. Values through BCD 0x99 (99) verified accepted; the toy's UI
+  glitches displaying 99 (the in-game balance cap is ~63) but the wire
+  accepts it. HP = 0 and any cap beyond BCD validity itself are untested
+  (§7).
+
+- **zeros + EXP — the experience counter.** Together these two fields hold
+  the toy's persistent experience value:
 
   ```
-  displayedEXP = 10 × decodeBcd3(zeros) + (EXP // 8)
+  displayedEXP = 10 × decodeBcd3(zeros) + (EXP div 8)
   ```
 
-  `zeros` is **3-digit BCD** (`hi..lo nibble = hundreds, tens, ones` of
-  `displayedEXP // 10`) — proven by `zeros = BCD"030"` → EXP 300 and
-  `zeros = BCD"003"` → EXP 30, exactly 10× the decoded value.
-  `EXP // 8` (0..15) is the **ones digit** — this is the same formula
-  originally found for EXP *alone* (14/14 exact, back when zeros was
-  always 0 and this term looked like the whole story); confirmed
-  additive by `zeros = BCD"003"`, `EXP = 2` (`EXP//8 = 0`) still showing
-  exactly 30, not 32. Because `EXP // 8` ranges 0–15, not just 0–9, **no
-  target integer 0..9999 needs rounding**: split `target = 10·Z + R`
-  (`Z = target // 10` → BCD into zeros, `R = target % 10` → `EXP`'s top
-  4 bits, `EXP = (R<<3) | low3`), and `EXP`'s low 3 bits remain fully
-  free for the checksum regardless of `R` (cycle through all 8 residues
-  the same way). `zeros` also feeds the checksum: `−digitSum3(zeros)`
-  (sum of its 3 hex nibbles), confirmed 3/3 by predicting the accepted
-  nibble ahead of testing. Sending zeros as **plain binary** instead of
-  BCD (e.g. 30 as `0b000000011110`, hex nibbles 0/1/14 — 14 isn't a
-  valid decimal digit) does not ERROR, it produces garbage (observed:
-  displayed EXP **1140**) — so `zeros` isn't BCD-validated the strict
-  way HP is; only its checksum contribution is checked. Both fields
-  round-trip bit-exact on the wire (an injected EXP=127 was re-sent 127
-  unchanged). Neither is what the toy displays as "Level" — that's the
-  checksum nibble (see §3.5's `check` field). `slave_emulator.ino`'s
-  `TARGET_EXP`/`solveLevelExp()` (rewritten 2026-07-19) is the
-  interface — set the exact 0..9999 value you want and it derives
-  `MONSTER_ZEROS`/`MONSTER_EXP` directly, no manual math needed. Field
-  width for EXP (7 vs 8 bits, 44–51 with no stop bit) still ambiguous
-  from the capture alone (the sketch only ever transmits 7 bits).
-- **No checksum**: the trailing bits do not depend on NUM/HP (exhaustive
-  CRC-8/CRC-16, weighted sums, nibble sums all fail; the two captures and
-  all accepted emulator payloads are consistent with independent fields).
+  `zeros` (the name is historical — the field was all-zero in the original
+  capture) is 3-digit BCD holding `displayedEXP div 10`
+  (hundreds/tens/ones nibbles). `EXP div 8` (range 0–15) is the ones
+  digit, additive with the zeros term. `EXP mod 8` — the low 3 bits — does
+  not affect the display at all; it is the free knob used to satisfy the
+  checksum. Because `EXP div 8` ranges 0–15, every integer 0–9999 is
+  representable exactly: split `target = 10·Z + R`, put `Z` in zeros as
+  BCD and send `EXP = (R << 3) | low3`.
+
+  Unlike HP, `zeros` is **not** BCD-validated: non-BCD nibbles are
+  accepted and decoded as garbage on screen (binary 30 = hex nibbles
+  0/1/14 displayed as EXP 1140). Only its checksum contribution is
+  enforced. Both fields round-trip bit-exact through a real toy. Whether
+  the EXP field is 7 or 8 bits wide (bits 44–51 with no stop bit) is
+  ambiguous from the capture (§7); the reference sketch transmits 7 bits
+  plus a stop bit.
+
+Receiver validation summary: the checksum's low 3 bits and HP's BCD-ness
+are enforced (ERROR + link abort on violation); no independent range check
+on the number byte has been observed.
 
 The slave's payload starts on the **cycle immediately following** the last
 cycle of the master's payload. The master acks (§3.4) after the slave
@@ -308,9 +236,8 @@ payload ends.
 | 0x2D | slave | §3.2 | "Ready / proceed" — advances the session to the next stage (after 0x39: session confirmed; during fast poll: triggers payload exchange; at end: trade complete, session closes) |
 | 0x27 | slave | §3.3 event | Event notification — sent once, replacing 0x34, right after a slave-side state change (user action / new screen) |
 
-Unknown: reject/cancel codes (this capture is an accepted trade on both
-sides). A rejecting device presumably answers something other than
-0x27/0x2D — capture one to find out.
+Reject/cancel codes are unknown (§7) — this capture is an accepted trade
+on both sides.
 
 ## 5. Session flow (annotated capture timeline)
 
@@ -358,56 +285,31 @@ switch is inferred from timing against the known user flow.
 
 ## 7. Open questions
 
-- Reject / cancel byte codes (need a capture of a refused trade).
-- Meaning of the master frame's 1-cycle low trailer.
-- ~~Real experience counter~~ SOLVED 2026-07-18/19: it SPANS both the
-  12 "zeros" bits (3-digit BCD, tens-and-up) and the 7-bit EXP field
-  (`EXP // 8`, the ones digit, additive) — see §3.5's combined entry.
-  What looked like the small EXP field's own separate, capped-at-15 stat
-  (SOLVED 2026-07-17) turned out to be exactly half of the real formula
-  all along; the "cap" was never real, it was just the low-order digit
-  of a number nobody had varied the high-order part of yet. Field width
-  for the small EXP field (7 vs 8 bit, bits 44–51 with no stop bit)
-  still ambiguous from the capture alone.
-- ~~"Level"~~ SOLVED 2026-07-17 (see §3.5's `check` field):
-  `(nibble>>2)+1` over the full 4-bit field, real ceiling **level 3**
-  (level 4 is a wire-reachable but non-game glitch value — the checksum
-  only validates 3 of the 4 bits, so it doesn't reject it, but real game
-  data never produces it). `slave_emulator.ino`'s `TARGET_LEVEL` (1..3) +
-  `TARGET_EXP` (0..9999, the exact real experience counter, no rounding
-  — see §3.5's combined entry) + `solveLevelExp()` (rewritten
-  2026-07-19) is the interface for building a monster by desired stats
-  instead of raw wire fields; it refuses `TARGET_LEVEL=4` and picks the
-  EXP field's low 3 bits (free without affecting `EXP // 8`, hence the
-  displayed experience) to hit the requested level exactly. Still open:
-  is this nibble-derived field literally the toy's internal progression
-  stat, or a separate trade-preview-only indicator that happens to share
-  the "Level" name with a deeper system not exposed on this wire at all?
-- HP ceiling (see §3.5): BCD 99 confirmed accepted (game UI breaks, wire
-  doesn't care); whether the toy enforces any cap beyond BCD validity
-  itself (i.e. anything reachable only via a non-standard, non-BCD wire
-  byte) is untested and would need bypassing the sketch's decimal
-  `MONSTER_HP` parameter.
-- Wire number ↔ displayed number mapping (see §3.5 candidate formula):
-  verify what Diamond Back (byte 0x11) displays — 18 or 28 — and whether
-  any monster displays "18". Harvest-mode logging of every real monster
-  (name + displayed number + wire payload) resolves this empirically.
-- Valid range of the number byte: 0x89 (138) confirmed (used throughout
-  the HP/EXP checksum sweeps); are bytes up to 0x7D (126) and the rest of the
-  12 secret monsters (presumably 0x7E..0x89, 127..138) all accepted?
-- Trade-abort behavior: after an aborted exchange (slave goes silent),
-  the master re-sends the *same* monster payload in the next session
-  regardless of a new selection — back fully out of the toy's trade menu
-  (or cancel on the toy) between harvest rounds to reset it.
-- Cancel/reject codes: the emulator now logs any master byte outside
-  {0x32, 0x2B, 0x39} — cancelling a trade on the toy mid-session should
-  finally reveal them.
-- ~~The 12 zero bits in the payload~~ SOLVED 2026-07-18 — this is the
-  real 3-digit-BCD, ×10-scaled experience counter, see §3.5.
-- Receiver validation, updated: nibble checksum and HP BCD-ness/range are
-  validated (ERROR screen + link abort on violation); a number-byte range
-  check is now unconfirmed (all previously assumed range errors were
-  checksum mismatches).
-- Clock arbitration between two real devices (who becomes master) — this
-  capture starts with device 1 already beaconing; the listen gaps are
-  visible but a two-master contention was not captured.
+- **Reject / cancel byte codes.** Never observed — the capture is an
+  accepted trade. The emulator logs any master byte outside
+  {0x32, 0x2B, 0x39}; cancelling a trade on the toy mid-session should
+  reveal them.
+- **Master frame trailer.** The purpose of the 1-cycle low tail (§3.1) is
+  unknown.
+- **Wire number ↔ displayed number mapping.** Byte 0x0A displays as "11"
+  (= byte + 1) but byte 0x04 displays as "15". Candidate formula:
+  `display = (check − 1) × 10 + byte + 1` — fits the three known points
+  (0x01→2, 0x04→15, 0x0A→11) but predicts byte 0x11 (Diamond Back)
+  displays "28" and that no monster displays "18"; unverified.
+  Harvest-mode dumps of a full real collection (name + displayed number +
+  wire payload) would settle it empirically.
+- **NUM byte valid range.** Accepted at every value tested (15 spot checks
+  across 0x01–0x89), but the range has never been swept exhaustively.
+- **HP limits.** BCD 99 is accepted; whether the toy enforces any cap
+  beyond BCD validity itself (i.e. anything reachable only via a non-BCD
+  wire byte) is untested, as is HP = 0.
+- **EXP field width.** 7 or 8 bits (bits 44–51 carry EXP + stop with no
+  separate framing) — ambiguous from the capture alone; the reference
+  sketch transmits 7 bits plus a stop bit and that is accepted.
+- **Level's true nature.** Is the nibble-derived Level (§3.5) literally
+  the toy's internal progression stat, or a trade-preview-only indicator
+  that shares the "Level" name with a deeper system not exposed on this
+  wire?
+- **Clock arbitration.** How two real devices decide who becomes master —
+  the capture starts with device 1 already beaconing; the listen gaps are
+  visible but a two-master contention was never captured.

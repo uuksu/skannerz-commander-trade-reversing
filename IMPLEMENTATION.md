@@ -1,9 +1,11 @@
 # Emulating a Skannerz device with an MCU
 
 Companion to `PROTOCOL.md` (read that first). Goal: replace one of the two
-toys with any MCU that can bit-bang two GPIOs, and send an arbitrary monster
-(one number byte; 1–138 verified, likely covering the whole 126+12
-roster) with arbitrary HP (1–99, no confirmed ceiling below that).
+toys with any MCU that can bit-bang two GPIOs and send an arbitrary
+monster — any wire number byte (spot-verified across 0x01–0x89), HP 1–99,
+level 1–3, and an exact experience counter 0–9999. The reference
+implementation of everything in this guide is
+`slave_emulator/slave_emulator.ino`.
 
 ## Hardware
 
@@ -90,17 +92,19 @@ autonomously.
 
 ## Slave emulator
 
-A ready-to-use Arduino implementation of everything in this section is in
-`slave_emulator/slave_emulator.ino` (set `MONSTER_NUM` / `MONSTER_HP` at
-the top — the checksum nibble is computed automatically; open-drain data
-handling included — see the electrical note in its header). Its
-`HARVEST_MODE` flag logs a real toy's monster payloads over serial and then
-holds without ever accepting, so a whole collection can be dumped without
-losing anything — **cancel each trade on the toy** rather than just
-unplugging: an abandoned session makes the toy re-send the same monster
-next round instead of the newly selected one, and the on-toy cancel both
-resets that and may put the still-unknown reject byte codes on the wire
-(the sketch logs any unexpected master byte).
+The reference implementation is `slave_emulator/slave_emulator.ino`. Set
+`MONSTER_NUM` / `MONSTER_HP` / `TARGET_LEVEL` / `TARGET_EXP` at the top —
+the checksum nibble and the raw experience fields are derived automatically
+(`solveLevelExp()`), and open-drain data handling is included (see the
+electrical note in its header).
+
+Its `HARVEST_MODE` flag logs a real toy's monster payloads over serial and
+then holds without ever accepting, so a whole collection can be dumped
+without losing anything. **Cancel each trade on the toy** rather than just
+unplugging: after a silently aborted session the toy re-sends the same
+monster next round instead of the newly selected one; the on-toy cancel
+resets that, and whatever bytes the cancel puts on the wire get logged
+(reject codes are still unknown — PROTOCOL.md §7).
 
 ### Bit primitives
 
@@ -153,104 +157,56 @@ for 3 cycles after your frame ends.
 
 ### Building the payload (52 bits)
 
-For monster number byte `B` (= displayed identity via an unknown mapping;
-1..0x89 verified accepted) and `HP` (1–99, BCD-encoded):
+For wire number byte `B` (the sketch's `MONSTER_NUM` − 1), `HP` 1–99, and
+target experience counter `REAL_EXP` 0–9999 (field semantics:
+PROTOCOL.md §3.5):
 
 ```
-def digit_sum(x): return (x >> 4) + (x & 0x0F)
-def digit_sum3(x): return (x >> 8 & 0xF) + (x >> 4 & 0xF) + (x & 0xF)  # 3 hex nibbles
+def digit_sum(x):  return (x >> 4) + (x & 0x0F)
+def digit_sum3(x): return (x >> 8 & 0xF) + (x >> 4 & 0xF) + (x & 0xF)
 
-hp_bcd    = (HP // 10) * 16 + HP % 10                    # BCD! binary HP -> ERROR
-zeros_bcd = ((REAL_EXP // 10) // 100) << 8 \
-          | ((REAL_EXP // 10) // 10 % 10) << 4 \
-          | ((REAL_EXP // 10) % 10)                       # 3-digit BCD of REAL_EXP/10
+hp_bcd    = (HP // 10) << 4 | HP % 10             # BCD! binary HP -> ERROR
+Z, R      = REAL_EXP // 10, REAL_EXP % 10
+zeros_bcd = (Z // 100) << 8 | (Z // 10 % 10) << 4 | (Z % 10)   # 3-digit BCD
+EXP       = (R << 3) | low3                       # low3 0..7: free checksum knob
 exp_term  = (EXP % 8) - (EXP // 8)
-check     = (-digit_sum(B) - 2*digit_sum(hp_bcd) - digit_sum3(zeros_bcd) + exp_term) % 8
+check     = (-digit_sum(B) - 2*digit_sum(hp_bcd)
+             - digit_sum3(zeros_bcd) + exp_term) % 8
+
 bits  = '0'                      # start
       + '111'                    # sync
       + f'{B:08b}'               # monster number byte
-      + f'{check:04b}'           # checksum nibble - wrong value -> ERROR (only low 3 bits checked)
+      + f'{check:04b}'           # checksum nibble (only low 3 bits checked)
       + f'{hp_bcd:08b}'          # HP, BCD
       + f'{hp_bcd:08b}'          # HP again (duplicate)
-      + f'{zeros_bcd:012b}'      # real experience's tens-and-up, 3-digit BCD, x10
-      + f'{EXP:07b}'             # top 4 bits (EXP>>3) = experience's ones digit;
-                                  # low 3 bits = free checksum-satisfying knob
+      + f'{zeros_bcd:012b}'      # experience counter, tens-and-up
+      + f'{EXP:07b}'             # experience ones digit (top 4 bits) + low3
       + '1'                      # stop
 ```
 
-Receiver-validated (real-toy testing, 2026-07-16): the checksum nibble
-must match `check` above (mismatch → ERROR + link abort — this, not a
-range check, is what rejected numbers 43/58 before the rule was known),
-though only its low 3 bits are actually checked — the toy accepts both
-`check` and `check + 8` for the same monster (confirmed by testing both
-directly), so the top bit is a don't-care and `check` as computed above
-(always 0..7) is always a valid choice. Both HP bytes must be valid BCD
-(0x3E → ERROR for the invalid low nibble). **No confirmed HP ceiling
-below 99**: BCD 0x99 (99) is accepted with the correct checksum — an
-earlier "BCD 99 → ERROR" finding predated knowing HP feeds the checksum
-and was a checksum mismatch, not a real range check (same trap the NUM
-field's early "range errors" turned out to be; see PROTOCOL.md §3.5/§7).
-The toy's UI visibly glitches at HP 99 (in-game balance caps around 63)
-but the wire accepts it. **Level is not simply derived from EXP** — it's
-the **full 4-bit nibble field**: `level = (nibble >> 2) + 1`, giving
-levels 1–4. Proven in two rounds against a real toy (2026-07-17): first,
-all 8 checksum-valid residues with the top bit 0 gave levels 1–2 (8/8);
-then, since the checksum only validates `nibble mod 8` (top bit is a
-don't-care for acceptance — see below), forcing the top bit set on the
-same monsters (`nibble` → `nibble+8`, still accepted) gave levels 3–4
-(4/4). So NUM/HP/EXP fix bit 2 of the nibble via the checksum (not
-freely choosable), but the top bit is free — for any one monster you can
-pick between exactly two levels (`L`, `L+2`) by choosing which
-checksum-valid nibble to send; the other pair needs different NUM/HP/EXP.
-**The real in-game ceiling is level 3** — 4 is a wire-reachable value the
-checksum doesn't reject (it only validates 3 of the 4 bits) but real
-game data never produces; treat nibble 12–15 as out-of-spec, not a 4th
-tier.
+Receiver validation, verified against a real toy:
 
-Rather than hand-deriving raw wire values for a target level, the sketch
-exposes `TARGET_LEVEL` (1..3) and `TARGET_EXP` (0..9999) directly, where
-`TARGET_EXP` is the **exact real, persistent experience counter** —
-solved 2026-07-18/19 after two wrong turns. First, the 7-bit `EXP` field
-alone looked like a plausible fit (round-trips bit-exact, has a clean
-`//8` display formula, 14/14 exact) until its readout proved to be
-mathematically capped at 15, which can't be the manual's exceeds-15,
-non-transferable battle counter. That led to the 12 "zeros" bits (sent
-as all-zero in every capture/test before this session not because
-they're unused, but because 3-digit BCD naturally reads as `000` when
-nothing's recorded there): BCD `030` displayed EXP 300, BCD `003`
-displayed EXP 30 — 10× the decoded value. That looked like the whole
-answer, until a value that wasn't a clean multiple of 10 (95) was
-requested: **the two fields are additive**, `displayedEXP = 10 ×
-decodeBcd3(zeros) + (EXP // 8)` — confirmed by the fact that this single
-formula fits all 4 known data points, including the *original*
-zeros=0/EXP=64→8 result, with zero free parameters. Since `EXP // 8`
-ranges 0–15 (not just 0–9), **any exact integer 0..9999 is reachable, no
-rounding**: `solveLevelExp()` splits the target as `10·Z + R`
-(`Z = target // 10` → BCD into `zeros`, `R = target % 10` → `EXP`'s top
-4 bits), then picks `EXP`'s low 3 bits (free without touching `EXP//8`,
-hence the display) to satisfy the checksum's `TARGET_LEVEL` band, and
-refuses `TARGET_LEVEL=4`. Set `USE_LEVEL_EXP_INTERFACE 0` to fall back
-to setting `MONSTER_ZEROS`/`MONSTER_EXP`/`MONSTER_NIBBLE` by hand for
-lower-level experiments (e.g. deliberately probing the level-4 glitch,
-or sending zeros as plain binary to reproduce the pre-BCD-fix garbage
-display).
+- The checksum's **low 3 bits** must match `check` above; a mismatch gives
+  an ERROR screen and a link abort. The nibble's top bit is ignored for
+  acceptance — both `check` and `check + 8` are accepted.
+- Both HP bytes must be valid BCD (e.g. 0x3E → ERROR). Verified accepted
+  through 99; the toy's UI glitches displaying 99 (in-game cap is ~63).
+  HP = 0 is untested; values above 99 are inexpressible in BCD through
+  this path.
+- The zeros field is **not** BCD-validated — invalid BCD decodes as
+  garbage on screen instead of erroring; only its checksum term is
+  enforced.
+- No independent range check on the number byte has been observed.
 
-The checksum formula above is fully solved, including the EXP term —
-`exp_term(9) == 0` is exactly why every earlier NUM/HP experiment
-"just worked" while EXP sat at the emulator's default of 9 — and the
-zeros term, added 2026-07-18, has the same "silently zero" property
-(`digitSum3(0) == 0`), which is why it took until zeros was deliberately
-set nonzero to notice it feeds the checksum at all. `EXP // 8` (proven
-by a real-toy sweep at EXP = 9/16/21/64/112/128, all exact; a
-BCD-decode theory was tested and refuted at EXP=16) was originally
-thought to be the small EXP field's *own*, separate display stat — it's
-actually the **ones digit of the real experience counter**, additive
-with `zeros`'s tens-and-up (see above). Field width (7 vs 8 bit) is
-still open.
-
-Note HP=0 is untested; the display flow suggests HP ≥ 1. HP=99 is the
-ceiling `hp_bcd` above can express without producing a non-BCD byte —
-whether the toy enforces anything beyond BCD validity itself is untested.
+The toy's monster menu shows **Level** = `(nibble >> 2) + 1` over the full
+4-bit field, and **EXP** = `10 × decodeBcd3(zeros) + EXP // 8`. The
+checksum pins the nibble's low 3 bits, but `low3` in the formula above is
+free (it never affects `EXP // 8`, only the checksum) and sweeping it
+walks the checksum through all 8 residues — so any level band is reachable
+without changing the displayed experience, and the top nibble bit picks
+between `L` and `L+2`. That is exactly what the sketch's `solveLevelExp()`
+automates; it refuses level 4, which is wire-acceptable but not a value
+real game data produces (PROTOCOL.md §3.5).
 
 ### Session state machine
 
@@ -278,7 +234,7 @@ state SELECT:
 
 state XFER:
     # master acks your 0x2D (2-cycle low pulse), idles 2 cycles,
-    # then sends its 52-bit payload in master slots (sample at falling edges).
+    # then sends its 52-cycle payload in master slots (sample at falling edges).
     receive 52 master-slot bits -> master's monster
     # your payload starts on the NEXT cycle after its last cycle:
     send 52 slave-slot bits (your payload)
@@ -341,7 +297,11 @@ completed slave frame with the 2-cycle low pulse (§3.4).
   master/slave streams by transition phase
 - `payload.py` / `detail.py` / `transcript.py` — frame dumps and per-cycle
   tables
-- `checksum.py` — the (failed) checksum search over the payload tail
+- `nibble_rule.py` — checksum/Level/experience rules with the full real-toy
+  accept/reject datasets and verifiers
+- `checksum.py` — brute-force search for a checksum over the payload tail
+  (none exists there; the real checksum is the 4-bit nibble — see
+  HISTORY.md)
 - `full_decode.py` — end-to-end decoder implementing PROTOCOL.md; regenerates
   `transcript.txt` (the complete decoded session). Both captured payloads
   decode to exactly the known traded monsters, validating the format.
