@@ -31,6 +31,10 @@ implementation of everything in this guide is
     approaches a 5 V AVR's input threshold — use fresh-ish batteries if
     reads get flaky.
 
+### Skannerz pins
+
+![Skannerz pins](skannerz-pins.jpg "Skannerz pins")
+
 ### Wiring diagram (5 V Arduino, direct — recommended)
 
 ```
