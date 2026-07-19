@@ -36,7 +36,7 @@ const uint8_t PIN_DATA = 3;
  * experience counter spans the zeros and EXP fields,
  * displayedEXP = 10*decodeBcd3(zeros) + EXP/8.
  * The displayed monster number is wire byte + 1 (wire is 0-indexed). */
-const uint8_t MONSTER_NUM    = 138;   // wire byte = NUM-1
+const uint8_t MONSTER_NUM    = 52;   // wire byte = NUM-1
 const uint8_t MONSTER_HP     = 63;   // 1..99, BCD-encoded by the sketch
 
 /* Primary interface: state the stats the toy should show instead of raw
